@@ -4,6 +4,9 @@ from zoneinfo import ZoneInfo
 from backend.app.core.config import settings
 
 
-def now_iso() -> str:
-    return datetime.now(ZoneInfo(settings.timezone)).isoformat(timespec="seconds")
+def now_shanghai() -> datetime:
+    return datetime.now(ZoneInfo(settings.timezone))
 
+
+def now_iso() -> str:
+    return now_shanghai().isoformat(timespec="seconds")
