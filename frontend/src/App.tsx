@@ -108,22 +108,33 @@ export function App() {
     setIsSaving(true);
     setMessage(null);
     try {
-      const payload = {
+      // 微信文章链接走专门的抓取接口
+      const isWechatUrl = sourceUrl.includes("mp.weixin.qq.com");
+      const endpoint = isWechatUrl ? `${API_BASE_URL}/api/source-items/fetch?source_url=${encodeURIComponent(sourceUrl)}` : `${API_BASE_URL}/api/source-items`;
+      const method = isWechatUrl ? "POST" : "POST";
+      const body = isWechatUrl ? null : JSON.stringify({
         source_type: sourceUrl ? "web" : "text",
         source_url: sourceUrl || null,
         raw_text: rawText || null,
-      };
-      const response = await fetch(`${API_BASE_URL}/api/source-items`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+      });
+
+      const response = await fetch(endpoint, {
+        method,
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body,
       });
       if (!response.ok) {
-        throw new Error("保存失败");
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || "保存失败");
+      }
+
+      if (isWechatUrl) {
+        setMessage("已抓取文章并保存到 Inbox");
+      } else {
+        setMessage("已保存到 Inbox");
       }
       setRawText("");
       setSourceUrl("");
-      setMessage("已保存到 Inbox");
       await loadItems();
     } finally {
       setIsSaving(false);
