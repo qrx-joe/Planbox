@@ -33,12 +33,12 @@ def get_source_item(source_item_id: str) -> SourceItemRead:
 
 
 @router.post("/{source_item_id}/extract", response_model=ExtractionResultRead)
-def request_extraction(source_item_id: str) -> ExtractionResultRead:
+async def request_extraction(source_item_id: str) -> ExtractionResultRead:
     item = service.get(source_item_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source item not found")
     service.mark_extract_pending(source_item_id)
-    return extraction_service.extract(source_item_id)
+    return await extraction_service.extract(source_item_id)
 
 
 @router.post("/{source_item_id}/assets", response_model=SourceItemUploadResponse)

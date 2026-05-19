@@ -2,6 +2,7 @@ import {
   CalendarDays,
   Check,
   ClipboardList,
+  Download,
   Inbox,
   Search,
   Sparkles,
@@ -54,7 +55,9 @@ type EventItem = {
   event_type?: string | null;
   registration_deadline_at?: string | null;
   event_start_at?: string | null;
+  event_end_at?: string | null;
   location?: string | null;
+  registration_url?: string | null;
   confidence?: number | null;
 };
 
@@ -338,25 +341,43 @@ export function App() {
         ) : null}
 
         {activeView === "activities" ? (
-          <section className="source-list">
-            {events.length === 0 ? (
-              <p className="empty">还没有正式活动。先从 Review 里确认一个。</p>
-            ) : (
-              events.map((event) => (
-                <article className="source-row" key={event.id}>
-                  <div>
-                    <h3>{event.title}</h3>
-                    <p>
-                      {[event.registration_deadline_at, event.event_start_at, event.location]
-                        .filter(Boolean)
-                        .join(" · ") || "时间地点待补充"}
-                    </p>
-                  </div>
-                  <span className="status">{event.status}</span>
-                </article>
-              ))
-            )}
-          </section>
+          <>
+            <section className="list-header">
+              <h2>已确认活动</h2>
+              <a className="button-link" href={`${API_BASE_URL}/api/calendar/export.ics`}>
+                <Download size={17} />
+                导出待行动日历
+              </a>
+            </section>
+            <section className="source-list">
+              {events.length === 0 ? (
+                <p className="empty">还没有正式活动。先从 Review 里确认一个。</p>
+              ) : (
+                events.map((event) => (
+                  <article className="source-row" key={event.id}>
+                    <div>
+                      <h3>{event.title}</h3>
+                      <p>
+                        {[event.registration_deadline_at, event.event_start_at, event.location]
+                          .filter(Boolean)
+                          .join(" · ") || "时间地点待补充"}
+                      </p>
+                    </div>
+                    <div className="row-actions">
+                      <span className="status">{event.status}</span>
+                      <a
+                        className="button-link secondary"
+                        href={`${API_BASE_URL}/api/calendar/events/${event.id}.ics`}
+                      >
+                        <Download size={16} />
+                        ICS
+                      </a>
+                    </div>
+                  </article>
+                ))
+              )}
+            </section>
+          </>
         ) : null}
       </section>
     </main>

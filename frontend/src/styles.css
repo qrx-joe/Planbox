@@ -147,12 +147,31 @@ button {
   font-weight: 700;
 }
 
+.button-link {
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 8px;
+  background: #1f6f54;
+  color: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
 
 button.secondary {
+  background: #edf1ed;
+  color: #24342e;
+}
+
+.button-link.secondary {
   background: #edf1ed;
   color: #24342e;
 }

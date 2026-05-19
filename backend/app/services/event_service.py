@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from backend.app.core.ids import new_id
 from backend.app.core.time import now_iso
 from backend.app.repositories.event_repository import EventRepository
@@ -68,6 +70,13 @@ class EventService:
     def list(self) -> list[EventRead]:
         return [self._to_read(row) for row in self.event_repository.list()]
 
+    def list_actionable(self) -> list[EventRead]:
+        return [self._to_read(row) for row in self.event_repository.list_actionable()]
+
+    def get(self, event_id: str) -> EventRead | None:
+        row = self.event_repository.get(event_id)
+        return self._to_read(row) if row else None
+
     def _to_read(self, row: dict[str, object]) -> EventRead:
         return EventRead(
             id=str(row["id"]),
@@ -92,4 +101,3 @@ class EventService:
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
         )
-

@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import re
+from typing import TYPE_CHECKING
 
 from backend.app.core.ids import new_id
 from backend.app.core.time import now_iso, now_shanghai
+from backend.app.providers.llm import BaseLLMProvider, FakeLLMProvider, OpenAIProvider
 from backend.app.repositories.extraction_repository import (
     ExtractionRepository,
     dumps_json,
@@ -15,23 +19,49 @@ from backend.app.schemas.extraction import (
     ReviewQueueItem,
 )
 
+if TYPE_CHECKING:
+    from backend.app.core.config import Settings
+
 
 class ExtractionService:
     def __init__(
         self,
         extraction_repository: ExtractionRepository | None = None,
         source_repository: SourceItemRepository | None = None,
+        llm_provider: BaseLLMProvider | None = None,
     ) -> None:
         self.extraction_repository = extraction_repository or ExtractionRepository()
         self.source_repository = source_repository or SourceItemRepository()
+        self.llm_provider = llm_provider
 
-    def extract(self, source_item_id: str) -> ExtractionResultRead:
+    def _get_llm_provider(self) -> BaseLLMProvider:
+        if self.llm_provider is not None:
+            return self.llm_provider
+        from backend.app.core.config import settings
+
+        if settings.llm_provider == "openai" and settings.openai_api_key:
+            return OpenAIProvider(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                model=settings.openai_model,
+            )
+        return FakeLLMProvider()
+
+    async def extract(self, source_item_id: str) -> ExtractionResultRead:
         source = self.source_repository.get(source_item_id)
         if source is None:
             raise ValueError("Source item not found")
 
         timestamp = now_iso()
-        draft = self._fake_extract(source)
+        provider = self._get_llm_provider()
+        text = str(source.get("raw_text") or "")
+        url = str(source.get("source_url") or "") or None
+
+        if isinstance(provider, FakeLLMProvider):
+            draft = self._rule_based_extract(source)
+        else:
+            draft = await self._llm_extract(provider, text, url)
+
         result_id = new_id("ext")
         row = self.extraction_repository.create(
             {
@@ -64,6 +94,99 @@ class ExtractionService:
         self.source_repository.update_parse_status(source_item_id, "parsed", timestamp)
         return self._to_read(row)
 
+    async def _llm_extract(
+        self,
+        provider: BaseLLMProvider,
+        text: str,
+        url: str | None,
+    ) -> ExtractedEventDraft:
+        import asyncio
+
+        raw_result = await asyncio.to_thread(provider.extract_event, text, url)
+
+        evidences = self._generate_evidences(raw_result, text)
+
+        missing_fields = self._compute_missing_fields(raw_result)
+
+        return ExtractedEventDraft(
+            title=raw_result.title,
+            event_type=raw_result.event_type,
+            organizer=raw_result.organizer,
+            registration_url=raw_result.registration_url,
+            registration_start_at=raw_result.registration_start_at,
+            registration_deadline_at=raw_result.registration_deadline_at,
+            event_start_at=raw_result.event_start_at,
+            event_end_at=raw_result.event_end_at,
+            location=raw_result.location,
+            is_online=raw_result.is_online,
+            schedule=raw_result.schedule,
+            fee=raw_result.fee,
+            prize=raw_result.prize,
+            team_required=raw_result.team_required,
+            audience=raw_result.audience,
+            missing_fields=missing_fields,
+            confidence=raw_result.confidence,
+            evidences=evidences,
+        )
+
+    def _generate_evidences(
+        self,
+        draft: ExtractedEventDraft,
+        source_text: str,
+    ) -> list[EvidenceDraft]:
+        evidences: list[EvidenceDraft] = []
+
+        field_mapping = {
+            "title": draft.title,
+            "event_type": draft.event_type,
+            "organizer": draft.organizer,
+            "registration_url": draft.registration_url,
+            "registration_deadline_at": draft.registration_deadline_at,
+            "event_start_at": draft.event_start_at,
+            "location": draft.location,
+            "fee": draft.fee,
+        }
+
+        for field_name, field_value in field_mapping.items():
+            if field_value:
+                evidence_text = self._find_evidence_text(field_value, source_text)
+                evidences.append(
+                    EvidenceDraft(
+                        field=field_name,
+                        value=str(field_value),
+                        evidence=evidence_text,
+                        confidence=0.8,
+                    )
+                )
+
+        return evidences
+
+    def _find_evidence_text(self, value: str, source_text: str) -> str:
+        max_len = 200
+        if len(source_text) <= max_len:
+            return source_text
+
+        idx = source_text.find(str(value))
+        if idx == -1:
+            return source_text[:max_len]
+
+        start = max(0, idx - 50)
+        end = min(len(source_text), idx + len(str(value)) + 50)
+        return source_text[start:end]
+
+    def _compute_missing_fields(self, draft: ExtractedEventDraft) -> list[str]:
+        required_fields = [
+            "registration_deadline_at",
+            "event_start_at",
+            "location",
+            "registration_url",
+        ]
+        missing = []
+        for field in required_fields:
+            if getattr(draft, field, None) is None:
+                missing.append(field)
+        return missing
+
     def list_review_queue(self) -> list[ReviewQueueItem]:
         return [self._to_review_item(row) for row in self.extraction_repository.list_pending()]
 
@@ -77,7 +200,7 @@ class ExtractionService:
     def mark_confirmed(self, extraction_result_id: str) -> None:
         self.extraction_repository.update_status(extraction_result_id, "confirmed", now_iso())
 
-    def _fake_extract(self, source: dict[str, object]) -> ExtractedEventDraft:
+    def _rule_based_extract(self, source: dict[str, object]) -> ExtractedEventDraft:
         text = str(source.get("raw_text") or "")
         url = str(source.get("source_url") or "") or None
         title = str(source.get("title") or "").strip() or self._guess_title(text, url)

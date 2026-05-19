@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from backend.app.db.database import connect
 
 
@@ -38,3 +40,24 @@ class EventRepository:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def list_actionable(self) -> list[dict[str, object]]:
+        with connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM events
+                WHERE status IN ('interested', 'applied')
+                ORDER BY
+                  CASE WHEN registration_deadline_at IS NULL THEN 1 ELSE 0 END,
+                  registration_deadline_at ASC,
+                  created_at DESC
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get(self, event_id: str) -> dict[str, object] | None:
+        with connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+            return dict(row) if row else None
