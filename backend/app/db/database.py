@@ -111,8 +111,58 @@ CREATE INDEX IF NOT EXISTS idx_events_registration_deadline_at
 CREATE INDEX IF NOT EXISTS idx_evidences_event_id
   ON evidences(event_id);
 
+CREATE TABLE IF NOT EXISTS reminders (
+  id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL,
+  reminder_type TEXT NOT NULL,
+  trigger_at TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (event_id) REFERENCES events(id)
+);
+
+CREATE TABLE IF NOT EXISTS opportunity_scores (
+  id TEXT PRIMARY KEY,
+  event_id TEXT NOT NULL,
+  fit_score INTEGER,
+  urgency_score INTEGER,
+  portfolio_value INTEGER,
+  networking_value INTEGER,
+  learning_value INTEGER,
+  time_cost TEXT,
+  recommendation TEXT,
+  reason_to_join TEXT,
+  reason_to_skip TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (event_id) REFERENCES events(id)
+);
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+  id TEXT PRIMARY KEY,
+  goals TEXT,
+  interested_topics TEXT,
+  blocked_topics TEXT,
+  preferred_locations TEXT,
+  online_only INTEGER,
+  available_time TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_evidences_extraction_result_id
   ON evidences(extraction_result_id);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_event_id
+  ON reminders(event_id);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_status
+  ON reminders(status);
+
+CREATE INDEX IF NOT EXISTS idx_opportunity_scores_event_id
+  ON opportunity_scores(event_id);
 """
 
 

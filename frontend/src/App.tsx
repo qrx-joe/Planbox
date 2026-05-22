@@ -1,17 +1,21 @@
 import {
+  AlertTriangle,
+  Bell,
   CalendarDays,
   Check,
   ClipboardList,
+  Clock,
   Download,
   Inbox,
   Search,
   Sparkles,
+  Star,
   Upload,
   X,
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useState } from "react";
 
-type View = "inbox" | "review" | "activities";
+type View = "inbox" | "review" | "activities" | "brief";
 
 type SourceItem = {
   id: string;
@@ -218,6 +222,10 @@ export function App() {
             <Search size={18} />
             <span>Activities</span>
           </NavButton>
+          <NavButton active={activeView === "brief"} onClick={() => setActiveView("brief")}>
+            <Bell size={18} />
+            <span>Brief</span>
+          </NavButton>
         </nav>
       </aside>
 
@@ -390,6 +398,8 @@ export function App() {
             </section>
           </>
         ) : null}
+
+        {activeView === "brief" ? <BriefView events={events} reviewItems={reviewItems} /> : null}
       </section>
     </main>
   );
@@ -423,16 +433,133 @@ function Field({ label, value }: { label: string; value?: string | null }) {
 function pageTitle(view: View) {
   if (view === "review") return "待确认队列";
   if (view === "activities") return "活动机会池";
+  if (view === "brief") return "每日简报";
   return "活动收件箱";
 }
 
 function pageSubtitle(view: View) {
   if (view === "review") return "AI 先给草稿，你确认以后才入库。";
   if (view === "activities") return "这里只放已经确认过、可以继续推进的活动。";
+  if (view === "brief") return "减少每天打开工具后的判断成本。";
   return "先把原文和链接收进来，下一步再做 AI 提取。";
 }
 
 function formatScore(score?: number | null) {
   if (score === null || score === undefined) return null;
   return `${Math.round(score * 100)}%`;
+}
+
+function BriefView({
+  events,
+  reviewItems,
+}: {
+  events: EventItem[];
+  reviewItems: ReviewQueueItem[];
+}) {
+  const now = new Date();
+  const threeDaysLater = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+
+  const urgentEvents = events.filter((e) => {
+    if (!e.registration_deadline_at) return false;
+    const deadline = new Date(e.registration_deadline_at);
+    return deadline <= threeDaysLater && deadline >= now;
+  });
+
+  const missingInfoEvents = events.filter((e) =>
+    [e.registration_deadline_at, e.event_start_at, e.location].some((v) => !v)
+  );
+
+  const expiredEvents = events.filter((e) => {
+    if (!e.registration_deadline_at) return false;
+    return new Date(e.registration_deadline_at) < now;
+  });
+
+  return (
+    <section className="brief-view">
+      {urgentEvents.length > 0 && (
+        <BriefSection icon={<AlertTriangle size={18} />} title="3天内截止" variant="urgent">
+          {urgentEvents.map((e) => (
+            <div key={e.id} className="brief-item">
+              <span className="brief-title">{e.title}</span>
+              <span className="brief-meta">截止 {formatRelativeDate(e.registration_deadline_at!)}</span>
+            </div>
+          ))}
+        </BriefSection>
+      )}
+
+      {reviewItems.length > 0 && (
+        <BriefSection icon={<ClipboardList size={18} />} title="待确认草稿" variant="action">
+          {reviewItems.map((item) => (
+            <div key={item.extraction.id} className="brief-item">
+              <span className="brief-title">{item.extraction.extracted.title}</span>
+              <span className="brief-meta">置信度 {formatScore(item.extraction.confidence)}</span>
+            </div>
+          ))}
+        </BriefSection>
+      )}
+
+      {missingInfoEvents.length > 0 && (
+        <BriefSection icon={<Star size={18} />} title="信息缺失" variant="info">
+          {missingInfoEvents.map((e) => (
+            <div key={e.id} className="brief-item">
+              <span className="brief-title">{e.title}</span>
+              <span className="brief-meta">待补充关键信息</span>
+            </div>
+          ))}
+        </BriefSection>
+      )}
+
+      {expiredEvents.length > 0 && (
+        <BriefSection icon={<Clock size={18} />} title="已过期" variant="expired">
+          {expiredEvents.map((e) => (
+            <div key={e.id} className="brief-item">
+              <span className="brief-title">{e.title}</span>
+              <span className="brief-meta">已截止</span>
+            </div>
+          ))}
+        </BriefSection>
+      )}
+
+      {urgentEvents.length === 0 &&
+        reviewItems.length === 0 &&
+        missingInfoEvents.length === 0 &&
+        expiredEvents.length === 0 && (
+          <p className="empty">今日无事，一切尽在掌握。</p>
+        )}
+    </section>
+  );
+}
+
+function BriefSection({
+  icon,
+  title,
+  variant,
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  variant: "urgent" | "action" | "info" | "expired";
+  children: ReactNode;
+}) {
+  return (
+    <article className={`brief-section ${variant}`}>
+      <h3>
+        {icon}
+        {title}
+      </h3>
+      <div className="brief-list">{children}</div>
+    </article>
+  );
+}
+
+function formatRelativeDate(dateStr: string): string {
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diffMs = date.getTime() - now.getTime();
+  const diffDays = Math.ceil(diffMs / (24 * 60 * 60 * 1000));
+
+  if (diffDays === 0) return "今天";
+  if (diffDays === 1) return "明天";
+  if (diffDays < 0) return "已过期";
+  return `${diffDays}天后`;
 }
