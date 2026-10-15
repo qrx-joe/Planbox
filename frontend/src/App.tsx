@@ -25,6 +25,38 @@ type SourceItem = {
   title?: string | null;
   captured_at: string;
   parse_status: string;
+  ingest_state?: string | null;
+  source_meta?: Record<string, unknown> | null;
+};
+
+type ShareIntakeResult = {
+  source_item_id: string;
+  state: "needs_content" | "ready";
+  title?: string | null;
+  source_url?: string | null;
+  is_wechat_article: boolean;
+  fetch_attempted: boolean;
+  fetch_succeeded: boolean;
+  fetch_error?: string | null;
+  next_action: string;
+  extraction_started: boolean;
+};
+
+/** 分享唤起参数，可从小程序分享或 URL query 读入，用于预填 */
+type SharePayload = {
+  scene?: string | null;
+  query?: string | null;
+  title?: string | null;
+  summary?: string | null;
+  article_url?: string | null;
+  webview_url?: string | null;
+  referer?: string | null;
+};
+
+/** 抓取失败后待用户补全的条目 */
+type PendingContent = {
+  id: string;
+  nextAction: string;
 };
 
 type ExtractedEventDraft = {
@@ -66,6 +98,29 @@ type EventItem = {
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+
+/**
+ * 从 URL query 读取分享唤起参数。
+ *
+ * 小程序分享到 Web 或从外部带参打开时，参数会挂在地址栏上。
+ * 微信不会告知用户正在读哪篇文章，所以这里能拿到的只是
+ * 分享者预置的 title / q / article_url，作为预填使用。
+ */
+function readSharePayloadFromUrl(): SharePayload | null {
+  const params = new URLSearchParams(window.location.search);
+  const keys = ["scene", "q", "title", "summary", "article_url", "referer"];
+  const found = keys.filter((key) => params.get(key));
+  if (found.length === 0) return null;
+
+  return {
+    scene: params.get("scene"),
+    query: params.get("q"),
+    title: params.get("title"),
+    summary: params.get("summary"),
+    article_url: params.get("article_url"),
+    referer: params.get("referer"),
+  };
+}
 
 type EventFilters = {
   keyword: string;
@@ -113,6 +168,8 @@ export function App() {
   const [evidences, setEvidences] = useState<EvidenceItem[]>([]);
   const [duplicates, setDuplicates] = useState<DuplicateCandidate[]>([]);
   const [duplicateBaseId, setDuplicateBaseId] = useState<string | null>(null);
+  const [sharePayload, setSharePayload] = useState<SharePayload | null>(null);
+  const [pendingContent, setPendingContent] = useState<PendingContent | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -124,6 +181,91 @@ export function App() {
   useEffect(() => {
     void loadEvents();
   }, [filters]);
+
+  // 分享唤起：读URL 参数做预填，不自动提交，等用户确认
+  useEffect(() => {
+    const payload = readSharePayloadFromUrl();
+    if (!payload) return;
+    setSharePayload(payload);
+    setActiveView("inbox");
+    // 分享标题先填进链接框，正文仍需用户粘贴
+    if (payload.article_url && !sourceUrl) {
+      setSourceUrl(payload.article_url);
+    } else if (!payload.article_url && payload.title) {
+      setRawText(payload.title);
+    }
+    if (payload.summary && !rawText) {
+      setRawText(payload.summary);
+    }
+  }, []);
+
+  /** 走分享入口提交。抓不到正文时引导用户粘贴，不报错。 */
+  async function submitShareIntake() {
+    if (!sharePayload) return;
+    setIsSaving(true);
+    setMessage(null);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/share/intake`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sharePayload),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || "分享入口提交失败");
+      }
+      const data: ShareIntakeResult = await response.json();
+
+      if (data.state === "needs_content") {
+        setPendingContent({ id: data.source_item_id, nextAction: data.next_action });
+        setMessage(data.next_action);
+      } else {
+        setMessage("已收到正文，已生成待确认草稿");
+        setSharePayload(null);
+      }
+      await loadItems();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "分享入口提交失败");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  /** 用户粘贴正文后补全分享入口建立的条目 */
+  async function completeContent() {
+    if (!pendingContent) return;
+    const text = rawText.trim();
+    if (text.length < 50) {
+      setMessage("正文太短，至少 50 字。请在文章页全选复制完整正文。");
+      return;
+    }
+    setIsSaving(true);
+    setMessage(null);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/share/${pendingContent.id}/complete`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ raw_text: text, auto_extract: true }),
+        }
+      );
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || "补全失败");
+      }
+      setMessage("正文已补全，已生成待确认草稿");
+      setPendingContent(null);
+      setRawText("");
+      setSharePayload(null);
+      setActiveView("review");
+      await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "补全失败");
+    } finally {
+      setIsSaving(false);
+    }
+  }
 
   async function refreshAll() {
     await Promise.all([loadItems(), loadReviewQueue(), loadEvents()]);
@@ -166,16 +308,19 @@ export function App() {
     try {
       // 微信文章链接走专门的抓取接口
       const isWechatUrl = sourceUrl.includes("mp.weixin.qq.com");
-      const endpoint = isWechatUrl ? `${API_BASE_URL}/api/source-items/fetch?source_url=${encodeURIComponent(sourceUrl)}` : `${API_BASE_URL}/api/source-items`;
-      const method = isWechatUrl ? "POST" : "POST";
-      const body = isWechatUrl ? null : JSON.stringify({
-        source_type: sourceUrl ? "web" : "text",
-        source_url: sourceUrl || null,
-        raw_text: rawText || null,
-      });
+      const endpoint = isWechatUrl
+        ? `${API_BASE_URL}/api/source-items/fetch?source_url=${encodeURIComponent(sourceUrl)}`
+        : `${API_BASE_URL}/api/source-items`;
+      const body = isWechatUrl
+        ? null
+        : JSON.stringify({
+            source_type: sourceUrl ? "web" : "text",
+            source_url: sourceUrl || null,
+            raw_text: rawText || null,
+          });
 
       const response = await fetch(endpoint, {
-        method,
+        method: "POST",
         headers: body ? { "Content-Type": "application/json" } : undefined,
         body,
       });
@@ -185,7 +330,17 @@ export function App() {
       }
 
       if (isWechatUrl) {
-        setMessage("已抓取文章并保存到 Inbox");
+        // 抓取失败是常态（微信风控），引导用户粘贴正文而非报错
+        const data = await response.json();
+        if (data.status === "needs_content") {
+          setPendingContent({
+            id: data.source_item.id,
+            nextAction: data.next_action,
+          });
+          setMessage(data.next_action);
+        } else {
+          setMessage("已抓取文章并生成待确认草稿");
+        }
       } else {
         setMessage("已保存到 Inbox");
       }
@@ -368,6 +523,53 @@ export function App() {
 
         {activeView === "inbox" ? (
           <>
+            {sharePayload ? (
+              <section className="share-banner">
+                <div>
+                  <strong>从微信分享进入</strong>
+                  <p>{sharePayload.title || sharePayload.article_url || "已接收分享参数"}</p>
+                </div>
+                <button
+                  type="button"
+                  disabled={isSaving}
+                  onClick={() => void submitShareIntake()}
+                >
+                  {isSaving ? "处理中" : "确认并抓取"}
+                </button>
+              </section>
+            ) : null}
+
+            {pendingContent ? (
+              <section className="pending-panel">
+                <h3>需要补全正文</h3>
+                <p>{pendingContent.nextAction}</p>
+                <label>
+                  在微信文章页长按全选复制正文，然后粘贴到这里
+                  <textarea
+                    value={rawText}
+                    onChange={(event) => setRawText(event.target.value)}
+                    placeholder="粘贴完整正文，AI 才能提取报名截止、举办时间等关键信息"
+                  />
+                </label>
+                <div className="composer-actions">
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => setPendingContent(null)}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSaving || rawText.trim().length < 50}
+                    onClick={() => void completeContent()}
+                  >
+                    {isSaving ? "补全中" : "补全并生成草稿"}
+                  </button>
+                </div>
+              </section>
+            ) : null}
+
             <form className="composer" onSubmit={handleSubmit}>
               <label>
                 链接
@@ -411,11 +613,32 @@ export function App() {
                       <p>{item.raw_text || item.source_url}</p>
                     </div>
                     <div className="row-actions">
-                      <span className="status">{item.parse_status}</span>
+                      {item.ingest_state === "needs_content" ? (
+                        <button
+                          type="button"
+                          className="status pending"
+                          onClick={() =>
+                            setPendingContent({
+                              id: item.id,
+                              nextAction:
+                                "这条还没有正文。请在微信文章页全选复制正文，粘贴到上方补全。",
+                            })
+                          }
+                        >
+                          待补正文
+                        </button>
+                      ) : (
+                        <span className="status">{item.parse_status}</span>
+                      )}
                       <button
                         type="button"
                         className="secondary"
-                        disabled={busyId === item.id}
+                        disabled={busyId === item.id || item.ingest_state === "needs_content"}
+                        title={
+                          item.ingest_state === "needs_content"
+                            ? "需要先补全正文"
+                            : "AI 抽取"
+                        }
                         onClick={() => extractSource(item.id)}
                       >
                         <Sparkles size={16} />

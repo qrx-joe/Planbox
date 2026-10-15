@@ -425,18 +425,201 @@ check("ICS 导出正常", code == 200 and isinstance(ics, str) and "BEGIN:VCALEN
 code, one_ics = call("GET", f"/api/calendar/events/{evt_a['id']}.ics")
 check("单活动 ICS 导出", code == 200 and isinstance(one_ics, str) and "BEGIN:VCALENDAR" in one_ics)
 
-print("\n[11] 数据库完整性")
+print("\n[12] 分享入口（小程序两段式采集）")
+
+# 12.1 分享唤起：微信不会告知正在读哪篇文章，所以只能拿到标题等预填信息
+code, intake = call(
+    "POST",
+    "/api/share/intake",
+    {
+        "scene": "1155",
+        "title": "2026 秋季 AI 黑客松报名开启",
+        "summary": "报名截止 10 月 20 日，上海线下，欢迎组队",
+        "article_url": "https://mp.weixin.qq.com/s/abcdef123456",
+    },
+)
+check("分享入口可调用", code == 200, f"code={code} {str(intake)[:120]}")
+check(
+    "识别为微信文章链接",
+    isinstance(intake, dict) and intake.get("is_wechat_article") is True,
+)
+check(
+    "摘要不足时降级为待补全",
+    isinstance(intake, dict) and intake.get("state") == "needs_content",
+    f"state={intake.get('state') if isinstance(intake, dict) else intake}",
+)
+check(
+    "返回明确的下一步指引",
+    isinstance(intake, dict) and bool(intake.get("next_action")),
+)
+check(
+    "抓取被尝试过",
+    isinstance(intake, dict) and intake.get("fetch_attempted") is True,
+)
+check(
+    "抓取失败不报错而是降级",
+    isinstance(intake, dict)
+    and intake.get("fetch_succeeded") is False
+    and intake.get("extraction_started") is False,
+)
+
+share_id = intake.get("source_item_id") if isinstance(intake, dict) else None
+check("返回条目 id", bool(share_id))
+
+# 12.2 条目已建立且标记为待补全
+code, item = call("GET", f"/api/source-items/{share_id}")
+check("分享条目已落库", code == 200, f"code={code}")
+check(
+    "ingest_state 为 needs_content",
+    isinstance(item, dict) and item.get("ingest_state") == "needs_content",
+)
+check("尚未解析", isinstance(item, dict) and item.get("parse_status") == "unparsed")
+meta = item.get("source_meta") if isinstance(item, dict) else None
+check("记录了分享来源 scene", isinstance(meta, dict) and meta.get("scene") == "1155")
+check("标记入口类型为 share", isinstance(meta, dict) and meta.get("entry") == "wechat_share")
+
+# 12.3 正文太短应被拒绝
+code, short = call(
+    "POST", f"/api/share/{share_id}/complete", {"raw_text": "太短了"}
+)
+check("正文过短被拒 400", code == 400, f"实际 {code}")
+check("拒绝时说明字数要求", isinstance(short, dict) and "字" in str(short.get("detail", "")))
+
+# 12.4 粘贴正文补全
+long_text = (
+    "2026 秋季 AI 黑客松正式开启报名。由智谱 AI 主办，报名截止 2026-10-20 23:59，"
+    "举办时间 2026-11-08 至 2026-11-10，地点上海徐汇区某创业园区，线下为主，"
+    "需要组队，每队 3-5 人，冠军奖金 20 万元，提供算力支持与导师对接。"
+    "适合有 AI Agent 开发经验的学生与工程师。"
+)
+code, done = call(
+    "POST",
+    f"/api/share/{share_id}/complete",
+    {"raw_text": long_text, "auto_extract": True},
+)
+check("补全成功", code == 200, f"code={code} {str(done)[:120]}")
+check("状态转为 ready", isinstance(done, dict) and done.get("state") == "ready")
+check("已触发 AI 抽取", isinstance(done, dict) and done.get("extraction_started") is True)
+
+# 12.5 补全后条目内容正确
+code, filled = call("GET", f"/api/source-items/{share_id}")
+check("正文已写入", isinstance(filled, dict) and (filled.get("raw_text") or "").startswith("2026"))
+check("ingest_state 转 ready", isinstance(filled, dict) and filled.get("ingest_state") == "ready")
+check(
+    "已标记解析中",
+    isinstance(filled, dict) and filled.get("parse_status") in {"pending", "parsed"},
+    f"实际 {filled.get('parse_status') if isinstance(filled, dict) else filled}",
+)
+check(
+    "保留了原分享链接",
+    isinstance(filled, dict)
+    and "mp.weixin.qq.com" in (filled.get("source_url") or ""),
+)
+
+# 12.6 幂等：相同正文重复提交不重复抽取
+code, again = call(
+    "POST",
+    f"/api/share/{share_id}/complete",
+    {"raw_text": long_text, "auto_extract": True},
+)
+check("重复提交仍成功", code == 200)
+check(
+    "幂等：不重复抽取",
+    isinstance(again, dict) and again.get("extraction_started") is False,
+    f"extraction_started={again.get('extraction_started') if isinstance(again, dict) else again}",
+)
+
+# 12.7 边界
+code, nf = call("POST", "/api/share/nonexistent/complete", {"raw_text": long_text})
+check("补全不存在的条目 404", code == 404)
+
+# 12.8 query 里藏链接时能被提取出来
+code, q_intake = call(
+    "POST",
+    "/api/share/intake",
+    {
+        "scene": "1007",
+        "query": "id=9&url=https%3A%2F%2Fmp.weixin.qq.com%2Fs%2Fhiddenurl999",
+    },
+)
+check("query 中的文章链接被识别", isinstance(q_intake, dict) and q_intake.get("is_wechat_article") is True, str(q_intake)[:150])
+check(
+    "解出真实链接",
+    isinstance(q_intake, dict)
+    and "hiddenurl999" in (q_intake.get("source_url") or ""),
+    f"实际 {q_intake.get('source_url') if isinstance(q_intake, dict) else q_intake}",
+)
+
+# 12.9 完全空的分享唤起也应建条目，不报错
+code, empty = call("POST", "/api/share/intake", {})
+check("空分享参数不报错", code == 200, f"code={code}")
+check("空参数也降级为待补全", isinstance(empty, dict) and empty.get("state") == "needs_content")
+
+# 12.10 带足够正文直接就绪，不需补全
+code, ready = call(
+    "POST",
+    "/api/share/intake",
+    {
+        "scene": "1044",
+        "title": "直接可用的正文",
+        "summary": long_text,
+    },
+)
+check("正文充足时直接 ready", isinstance(ready, dict) and ready.get("state") == "ready", str(ready)[:150])
+check("直接触发抽取", isinstance(ready, dict) and ready.get("extraction_started") is True)
+
+# 12.11 旧的 fetch 接口降级而非报错
+code, fetched = call(
+    "POST",
+    "/api/source-items/fetch?source_url=https%3A%2F%2Fmp.weixin.qq.com%2Fs%2Ffakeid000",
+)
+check("抓取接口不再抛 422", code == 200, f"实际 {code} {str(fetched)[:120]}")
+check(
+    "抓取失败时返回 needs_content",
+    isinstance(fetched, dict) and fetched.get("status") == "needs_content",
+)
+check("抓取接口也给出指引", isinstance(fetched, dict) and bool(fetched.get("next_action")))
+check(
+    "抓取接口仍建立条目",
+    isinstance(fetched, dict) and "id" in (fetched.get("source_item") or {}),
+)
+
+code, notwx = call("POST", "/api/source-items/fetch?source_url=https%3A%2F%2Fexample.com%2Fx")
+check("非微信链接仍返回 400", code == 400)
+
+print("\n[13] 数据库完整性")
 conn = sqlite3.connect(str(TEST_DIR / "e2e.db"))
+# 只查已确认草稿的证据——pending_review 尚未入库，event_id 为 NULL 是正确的
 orphan = conn.execute(
-    "SELECT COUNT(*) FROM evidences WHERE extraction_result_id IS NOT NULL AND event_id IS NULL"
+    """
+    SELECT COUNT(*) FROM evidences e
+    JOIN extraction_results x ON x.id = e.extraction_result_id
+    WHERE x.status = 'confirmed' AND e.event_id IS NULL
+    """
 ).fetchone()[0]
-check("无孤儿证据（已确认草稿的证据均已关联）", orphan == 0, f"孤儿数 {orphan}")
+check("已确认草稿的证据均已关联活动", orphan == 0, f"孤儿数 {orphan}")
+pending_orphan = conn.execute(
+    """
+    SELECT COUNT(*) FROM evidences e
+    JOIN extraction_results x ON x.id = e.extraction_result_id
+    WHERE x.status = 'pending_review' AND e.event_id IS NULL
+    """
+).fetchone()[0]
+check("待确认草稿的证据尚未关联（符合预期）", pending_orphan > 0, f"{pending_orphan}")
 mismatch = conn.execute(
     "SELECT COUNT(*) FROM events WHERE id NOT IN (SELECT event_id FROM event_sources)"
 ).fetchone()[0]
 check("每个活动都有来源记录", mismatch == 0, f"缺来源 {mismatch}")
 cols = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
 check("events 表已有 notes 列（迁移生效）", "notes" in cols)
+src_cols = {row[1] for row in conn.execute("PRAGMA table_info(source_items)")}
+check("source_items 已有 ingest_state 列", "ingest_state" in src_cols)
+check("source_items 已有 source_meta 列", "source_meta" in src_cols)
+
+no_meta = conn.execute(
+    "SELECT COUNT(*) FROM source_items WHERE ingest_state IS NULL"
+).fetchone()[0]
+check("所有 source_item 都有 ingest_state", no_meta == 0, f"缺失 {no_meta}")
 conn.close()
 
 print(f"\n{'=' * 50}\n通过 {passed} / {passed + failed}\n{'=' * 50}")

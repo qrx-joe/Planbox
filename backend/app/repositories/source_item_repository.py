@@ -29,6 +29,50 @@ class SourceItemRepository:
             ).fetchone()
             return dict(row) if row else None
 
+    def update_content(
+        self,
+        *,
+        source_item_id: str,
+        raw_text: str,
+        title: str | None,
+        published_at: str | None,
+        ingest_state: str,
+        parse_status: str,
+        updated_at: str,
+    ) -> dict[str, object]:
+        """补全正文。用户粘贴后调用，会重置解析状态以便重新抽取。"""
+        with connect() as connection:
+            connection.execute(
+                """
+                UPDATE source_items
+                SET raw_text = ?,
+                    title = COALESCE(?, title),
+                    published_at = COALESCE(?, published_at),
+                    ingest_state = ?,
+                    parse_status = ?,
+                    parse_error = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    raw_text,
+                    title,
+                    published_at,
+                    ingest_state,
+                    parse_status,
+                    updated_at,
+                    source_item_id,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM source_items WHERE id = ?",
+                (source_item_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Source item was not persisted")
+        return dict(row)
+
     def update_parse_status(
         self,
         source_item_id: str,

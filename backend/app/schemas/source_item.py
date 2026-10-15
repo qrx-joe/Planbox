@@ -30,6 +30,10 @@ class SourceItemRead(BaseModel):
     captured_at: str
     parse_status: ParseStatus
     parse_error: str | None = None
+    # null 表示旧数据或非分享入口创建的条目，视为已就绪
+    ingest_state: str | None = None
+    # 分享入口的原始参数快照，便于回溯来源
+    source_meta: dict[str, object] | None = None
     created_at: str
     updated_at: str
 
@@ -42,4 +46,19 @@ class SourceItemUploadResponse(BaseModel):
     original_filename: str | None = None
     mime_type: str | None = None
     created_at: str
+
+
+class WechatFetchResponse(BaseModel):
+    """抓取结果。
+
+    微信对服务端直连有风控，抓取失败是常态而非异常，
+    因此不抛错，而是用 status 告知前端下一步该做什么。
+    """
+
+    source_item: SourceItemRead
+    status: Literal["ready", "needs_content"]
+    fetch_succeeded: bool
+    fetch_error: str | None = None
+    next_action: str
+    extraction_started: bool = False
 

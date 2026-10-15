@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import json
 from pathlib import Path
 
 from fastapi import UploadFile
@@ -18,30 +21,95 @@ class SourceService:
         self.repository = repository or SourceItemRepository()
 
     def create(self, payload: SourceItemCreate) -> SourceItemRead:
+        return self.create_with_meta(
+            source_type=payload.source_type,
+            source_url=str(payload.source_url) if payload.source_url else None,
+            raw_text=payload.raw_text,
+            title=payload.title,
+            published_at=payload.published_at,
+            ingest_state="ready",
+            source_meta=None,
+        )
+
+    def create_with_meta(
+        self,
+        *,
+        source_type: str,
+        source_url: str | None,
+        raw_text: str | None,
+        title: str | None,
+        published_at: str | None,
+        ingest_state: str,
+        source_meta: dict[str, object] | None,
+    ) -> SourceItemRead:
+        """带来源元信息的创建。分享入口用它记录 scene 等原始参数。"""
         timestamp = now_iso()
         row = self.repository.create(
             {
                 "id": new_id("src"),
-                "source_type": payload.source_type,
-                "source_url": str(payload.source_url) if payload.source_url else None,
-                "raw_text": payload.raw_text,
-                "title": payload.title,
-                "published_at": payload.published_at,
+                "source_type": source_type,
+                "source_url": source_url,
+                "raw_text": raw_text,
+                "title": title,
+                "published_at": published_at,
                 "captured_at": timestamp,
                 "parse_status": "unparsed",
                 "parse_error": None,
+                "ingest_state": ingest_state,
+                "source_meta": (
+                    json.dumps(source_meta, ensure_ascii=False) if source_meta else None
+                ),
                 "created_at": timestamp,
                 "updated_at": timestamp,
             }
         )
-        return SourceItemRead.model_validate(row)
+        return self._to_read(row)
+
+    def update_content(
+        self,
+        *,
+        source_item_id: str,
+        raw_text: str,
+        title: str | None,
+        published_at: str | None,
+    ) -> SourceItemRead:
+        """用户粘贴正文后的补全。会清掉旧的 parse_error 并重置为待解析。"""
+        timestamp = now_iso()
+        row = self.repository.update_content(
+            source_item_id=source_item_id,
+            raw_text=raw_text,
+            title=title,
+            published_at=published_at,
+            ingest_state="ready",
+            parse_status="unparsed",
+            updated_at=timestamp,
+        )
+        return self._to_read(row)
 
     def list(self) -> list[SourceItemRead]:
-        return [SourceItemRead.model_validate(row) for row in self.repository.list()]
+        return [self._to_read(row) for row in self.repository.list()]
 
     def get(self, source_item_id: str) -> SourceItemRead | None:
         row = self.repository.get(source_item_id)
-        return SourceItemRead.model_validate(row) if row else None
+        return self._to_read(row) if row else None
+
+    def _to_read(self, row: dict[str, object]) -> SourceItemRead:
+        """DB 行 → schema。source_meta 是 JSON 字符串，需要单独解析。"""
+        return SourceItemRead(
+            id=str(row["id"]),
+            source_type=str(row["source_type"]),  # type: ignore[arg-type]
+            source_url=row.get("source_url"),  # type: ignore[arg-type]
+            raw_text=row.get("raw_text"),  # type: ignore[arg-type]
+            title=row.get("title"),  # type: ignore[arg-type]
+            published_at=row.get("published_at"),  # type: ignore[arg-type]
+            captured_at=str(row["captured_at"]),
+            parse_status=str(row["parse_status"]),  # type: ignore[arg-type]
+            parse_error=row.get("parse_error"),  # type: ignore[arg-type]
+            ingest_state=row.get("ingest_state"),  # type: ignore[arg-type]
+            source_meta=_loads_meta(row.get("source_meta")),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
 
     def mark_extract_pending(self, source_item_id: str) -> None:
         self.repository.update_parse_status(source_item_id, "pending", now_iso())
@@ -69,3 +137,13 @@ class SourceService:
             }
         )
         return SourceItemUploadResponse.model_validate(row)
+
+
+def _loads_meta(raw: object) -> dict[str, object] | None:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(str(raw))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None

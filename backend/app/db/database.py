@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS source_items (
   captured_at TEXT NOT NULL,
   parse_status TEXT NOT NULL,
   parse_error TEXT,
+  ingest_state TEXT,
+  source_meta TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -190,6 +192,16 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
     migrations: tuple[tuple[str, str, str], ...] = (
         # (表名, 新列名, ALTER 语句)
         ("events", "notes", "ALTER TABLE events ADD COLUMN notes TEXT"),
+        (
+            "source_items",
+            "ingest_state",
+            "ALTER TABLE source_items ADD COLUMN ingest_state TEXT",
+        ),
+        (
+            "source_items",
+            "source_meta",
+            "ALTER TABLE source_items ADD COLUMN source_meta TEXT",
+        ),
     )
     for table, column, alter in migrations:
         if column not in _existing_columns(connection, table):

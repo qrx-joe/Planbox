@@ -641,6 +641,65 @@ dd {
   color: var(--text-muted);
 }
 
+/* === SHARE INTAKE === */
+.share-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  margin-bottom: var(--space-md);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: var(--radius-md);
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.share-banner p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* === PENDING CONTENT === */
+.pending-panel {
+  padding: var(--space-md);
+  margin-bottom: var(--space-md);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: var(--radius-md);
+  background: rgba(245, 158, 11, 0.07);
+}
+
+.pending-panel h3 {
+  margin: 0 0 var(--space-xs);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.pending-panel p {
+  margin: 0 0 var(--space-sm);
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.pending-panel label {
+  display: block;
+  font-size: 13px;
+}
+
+.pending-panel textarea {
+  min-height: 160px;
+  font-family: inherit;
+}
+
+.status.pending {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  cursor: pointer;
+}
+
 /* === RESPONSIVE === */
 @media (max-width: 760px) {
   .app-shell {
