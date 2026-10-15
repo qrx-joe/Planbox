@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS events (
   status TEXT NOT NULL,
   missing_fields TEXT,
   confidence REAL,
+  notes TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -171,7 +172,28 @@ def initialize_database() -> None:
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     with connect() as connection:
         connection.executescript(SCHEMA)
+        _run_migrations(connection)
         connection.commit()
+
+
+def _existing_columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return {str(row["name"]) for row in rows}
+
+
+def _run_migrations(connection: sqlite3.Connection) -> None:
+    """为已存在的库补齐新版本引入的列。
+
+    SCHEMA 里的 CREATE TABLE IF NOT EXISTS 对已存在的表不会生效，
+    所以后续新增字段必须在这里显式补，否则老库读新字段会报错。
+    """
+    migrations: tuple[tuple[str, str, str], ...] = (
+        # (表名, 新列名, ALTER 语句)
+        ("events", "notes", "ALTER TABLE events ADD COLUMN notes TEXT"),
+    )
+    for table, column, alter in migrations:
+        if column not in _existing_columns(connection, table):
+            connection.execute(alter)
 
 
 @contextmanager

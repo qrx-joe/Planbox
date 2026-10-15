@@ -100,9 +100,7 @@ class ExtractionService:
         text: str,
         url: str | None,
     ) -> ExtractedEventDraft:
-        import asyncio
-
-        raw_result = await asyncio.to_thread(provider.extract_event, text, url)
+        raw_result = await provider.extract_event(text, url)
 
         evidences = self._generate_evidences(raw_result, text)
 

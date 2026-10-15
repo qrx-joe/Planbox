@@ -1,25 +1,139 @@
-from fastapi import APIRouter, HTTPException, status
 
-from backend.app.schemas.event import EventRead
+from fastapi import APIRouter, HTTPException, Query, status
+
+from backend.app.repositories.event_repository import EventQuery
+from backend.app.schemas.event import (
+    DuplicateCheckResponse,
+    EventListResponse,
+    EventMergeRequest,
+    EventMergeResponse,
+    EventRead,
+    EventStatusUpdate,
+    EventUpdate,
+)
 from backend.app.schemas.opportunity_score import OpportunityScoreRead
-from backend.app.services.event_service import EventService
+from backend.app.services.dedup_service import DedupService
+from backend.app.services.event_service import EventService, EventStatusError
 from backend.app.services.scoring_service import ScoringService
 
 router = APIRouter()
 service = EventService()
 scoring_service = ScoringService()
+dedup_service = DedupService()
 
 
-@router.get("", response_model=list[EventRead])
-def list_events() -> list[EventRead]:
-    return service.list()
+def _not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+
+
+# ruff: noqa: B008  —— FastAPI 依赖注入的标准写法，Query 必须在默认值位置调用
+@router.get("", response_model=EventListResponse | list[EventRead])
+def list_events(
+    status_filter: list[str] | None = Query(None, alias="status"),
+    keyword: str | None = None,
+    event_type: str | None = None,
+    is_online: bool | None = None,
+    location: str | None = None,
+    deadline_before: str | None = None,
+    deadline_after: str | None = None,
+    event_start_after: str | None = None,
+    event_start_before: str | None = None,
+    only_actionable: bool = False,
+    has_missing_fields: bool | None = None,
+    sort: str = "deadline",
+    order: str = "asc",
+    limit: int | None = Query(None, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    paginated: bool = True,
+) -> EventListResponse | list[EventRead]:
+    """活动列表。支持按状态、关键词、类型、线上线下、地点、时间区间筛选与排序。
+
+    默认返回分页结构 {items, total}；传 paginated=false 时返回纯数组，兼容旧客户端。
+    """
+    query = EventQuery(
+        status=status_filter,
+        keyword=keyword,
+        event_type=event_type,
+        is_online=is_online,
+        location=location,
+        deadline_before=deadline_before,
+        deadline_after=deadline_after,
+        event_start_after=event_start_after,
+        event_start_before=event_start_before,
+        only_actionable=only_actionable,
+        has_missing_fields=has_missing_fields,
+        sort=sort,
+        order=order,
+        limit=limit,
+        offset=offset,
+    )
+    if paginated:
+        return service.list_paginated(query)
+    return service.list(query)
+
+
+@router.get("/duplicates/{event_id}", response_model=DuplicateCheckResponse)
+def check_duplicates(event_id: str) -> DuplicateCheckResponse:
+    """检查某活动是否存在重复项。不存在时返回 candidates 为空。"""
+    if service.get(event_id) is None:
+        raise _not_found()
+    return dedup_service.find_duplicates(event_id)
+
+
+@router.post("/merge", response_model=EventMergeResponse)
+def merge_events(payload: EventMergeRequest) -> EventMergeResponse:
+    """把重复活动合并进保留活动：用source 补全 target 的空字段，保留多来源证据。"""
+    try:
+        return dedup_service.merge(payload.target_id, payload.source_id)
+    except KeyError as exc:
+        raise _not_found() from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/{event_id}", response_model=EventRead)
+def get_event(event_id: str) -> EventRead:
+    event = service.get(event_id)
+    if event is None:
+        raise _not_found()
+    return event
+
+
+@router.patch("/{event_id}", response_model=EventRead)
+def update_event(event_id: str, payload: EventUpdate) -> EventRead:
+    """修正活动字段。只传需要修改的字段，未传的字段保持不变。"""
+    try:
+        return service.update(event_id, payload)
+    except KeyError as exc:
+        raise _not_found() from exc
+    except EventStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.patch("/{event_id}/status", response_model=EventRead)
+def update_event_status(event_id: str, payload: EventStatusUpdate) -> EventRead:
+    """流转活动状态。会校验迁移路径，非法流转返回 400。"""
+    try:
+        return service.update_status(event_id, payload)
+    except KeyError as exc:
+        raise _not_found() from exc
+    except EventStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.delete("/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_event(event_id: str) -> None:
+    try:
+        service.delete(event_id)
+    except KeyError as exc:
+        raise _not_found() from exc
 
 
 @router.post("/{event_id}/score", response_model=OpportunityScoreRead)
 def score_event(event_id: str) -> OpportunityScoreRead:
     event = service.get(event_id)
     if event is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+        raise _not_found()
     return scoring_service.score_event(event.model_dump())
 
 

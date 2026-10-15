@@ -52,6 +52,33 @@ class ExtractionRepository:
             )
             connection.commit()
 
+    def list_field_names(self, extraction_result_id: str) -> set[str]:
+        """该草稿已有的证据字段名，用于确认时避免重复写入。"""
+        with connect() as connection:
+            rows = connection.execute(
+                "SELECT field_name FROM evidences WHERE extraction_result_id = ?",
+                (extraction_result_id,),
+            ).fetchall()
+            return {str(row["field_name"]) for row in rows}
+
+    def attach_evidences_to_event(self, extraction_result_id: str, event_id: str) -> int:
+        """确认入库时把草稿证据挂到正式活动上。
+
+        证据在抽取阶段就写入，此时 event_id 为 NULL；不补这一步，
+        evidences 表里的记录就永远无法按活动检索。
+        """
+        with connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE evidences
+                SET event_id = ?
+                WHERE extraction_result_id = ? AND event_id IS NULL
+                """,
+                (event_id, extraction_result_id),
+            )
+            connection.commit()
+            return cursor.rowcount
+
     def create_evidences(self, rows: list[dict[str, object]]) -> None:
         if not rows:
             return

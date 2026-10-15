@@ -8,7 +8,11 @@ from backend.app.schemas.source_item import (
 )
 from backend.app.services.extraction_service import ExtractionService
 from backend.app.services.source_service import SourceService
-from backend.app.services.wechat_fetcher import is_wechat_url, fetch_wechat_article, WechatFetcherError
+from backend.app.services.wechat_fetcher import (
+    WechatFetcherError,
+    fetch_wechat_article,
+    is_wechat_url,
+)
 
 router = APIRouter()
 service = SourceService()
@@ -36,7 +40,9 @@ async def fetch_and_create_wechat_article(source_url: str) -> SourceItemRead:
     try:
         article = await fetch_wechat_article(source_url)
     except WechatFetcherError as e:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)
+        ) from e
 
     payload = SourceItemCreate(
         source_type="wechat",

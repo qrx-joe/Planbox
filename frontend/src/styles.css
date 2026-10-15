@@ -535,6 +535,112 @@ dd {
   font-variant-numeric: tabular-nums;
 }
 
+/* === FILTER BAR === */
+.filter-bar {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-md);
+}
+
+.filter-bar input[type="search"] {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.filter-bar select {
+  min-width: 130px;
+}
+
+.inline-actions {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+  margin-top: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.status-select {
+  padding: 4px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  color: var(--accent);
+}
+
+/* === EVIDENCE LIST === */
+.evidence-list {
+  list-style: none;
+  margin: var(--space-sm) 0 0;
+  padding: var(--space-sm) 0 0;
+  border-top: 1px dashed var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.evidence-list li {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.evidence-list strong {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.confidence {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* === DUPLICATE PANEL === */
+.duplicate-panel {
+  margin-top: var(--space-lg);
+  padding: var(--space-md);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+.duplicate-panel h3 {
+  margin: 0 0 var(--space-sm);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.duplicate-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-sm) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.duplicate-row p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* === RESPONSIVE === */
 @media (max-width: 760px) {
   .app-shell {

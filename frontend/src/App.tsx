@@ -67,6 +67,37 @@ type EventItem = {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 
+type EventFilters = {
+  keyword: string;
+  status: string;
+  deadlineWithinDays: number;
+};
+
+const STATUS_OPTIONS = [
+  { value: "", label: "全部状态" },
+  { value: "interested", label: "感兴趣" },
+  { value: "applied", label: "已报名" },
+  { value: "rejected", label: "已放弃" },
+  { value: "ongoing", label: "进行中" },
+  { value: "done", label: "已结束" },
+  { value: "expired", label: "已过期" },
+] as const;
+
+type EvidenceItem = {
+  id: string;
+  field_name: string;
+  field_value?: string | null;
+  evidence_text?: string | null;
+  confidence?: number | null;
+  source_url?: string | null;
+};
+
+type DuplicateCandidate = {
+  event: EventItem;
+  match_reasons: string[];
+  match_score: number;
+};
+
 export function App() {
   const [activeView, setActiveView] = useState<View>("inbox");
   const [rawText, setRawText] = useState("");
@@ -74,6 +105,14 @@ export function App() {
   const [items, setItems] = useState<SourceItem[]>([]);
   const [reviewItems, setReviewItems] = useState<ReviewQueueItem[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
+  const [filters, setFilters] = useState<EventFilters>({
+    keyword: "",
+    status: "",
+    deadlineWithinDays: 0,
+  });
+  const [evidences, setEvidences] = useState<EvidenceItem[]>([]);
+  const [duplicates, setDuplicates] = useState<DuplicateCandidate[]>([]);
+  const [duplicateBaseId, setDuplicateBaseId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -81,6 +120,10 @@ export function App() {
   useEffect(() => {
     void refreshAll();
   }, []);
+
+  useEffect(() => {
+    void loadEvents();
+  }, [filters]);
 
   async function refreshAll() {
     await Promise.all([loadItems(), loadReviewQueue(), loadEvents()]);
@@ -101,7 +144,16 @@ export function App() {
   }
 
   async function loadEvents() {
-    const response = await fetch(`${API_BASE_URL}/api/events`);
+    const params = new URLSearchParams();
+    if (filters.keyword) params.set("keyword", filters.keyword);
+    if (filters.status) params.set("status", filters.status);
+    if (filters.deadlineWithinDays) {
+      const until = new Date(Date.now() + filters.deadlineWithinDays * 86400000).toISOString();
+      params.set("deadline_before", until);
+      params.set("deadline_after", new Date().toISOString());
+    }
+    params.set("paginated", "false");
+    const response = await fetch(`${API_BASE_URL}/api/events?${params.toString()}`);
     if (response.ok) {
       setEvents(await response.json());
     }
@@ -194,6 +246,78 @@ export function App() {
       }
       setMessage("已放弃该草稿");
       await refreshAll();
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function updateEventStatus(eventId: string, nextStatus: string) {
+    setBusyId(eventId);
+    setMessage(null);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/events/${eventId}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || "状态更新失败");
+      }
+      setMessage("状态已更新");
+      await loadEvents();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "状态更新失败");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function loadEvidences(eventId: string) {
+    const response = await fetch(`${API_BASE_URL}/api/evidences/${eventId}`);
+    if (response.ok) {
+      const data = await response.json();
+      setEvidences(data.items ?? []);
+    } else {
+      setEvidences([]);
+    }
+  }
+
+  async function checkDuplicates(eventId: string) {
+    const response = await fetch(`${API_BASE_URL}/api/events/duplicates/${eventId}`);
+    if (response.ok) {
+      const data = await response.json();
+      const candidates = (data.candidates ?? []) as DuplicateCandidate[];
+      setDuplicates(candidates);
+      setDuplicateBaseId(eventId);
+      setMessage(
+        candidates.length > 0 ? `发现 ${candidates.length} 个可能重复的活动` : "没有发现重复活动"
+      );
+    } else {
+      setDuplicates([]);
+      setDuplicateBaseId(null);
+    }
+  }
+
+  async function mergeEvents(targetId: string, sourceId: string) {
+    setBusyId(sourceId);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/events/merge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_id: targetId, source_id: sourceId }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || "合并失败");
+      }
+      const data = await response.json();
+      setMessage(`已合并，补全了 ${data.filled_fields?.length ?? 0} 个字段`);
+      setDuplicates([]);
+      setDuplicateBaseId(null);
+      await loadEvents();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "合并失败");
     } finally {
       setBusyId(null);
     }
@@ -368,6 +492,37 @@ export function App() {
                 导出待行动日历
               </a>
             </section>
+
+            <section className="filter-bar">
+              <input
+                type="search"
+                placeholder="搜索活动名称、主办方、地点"
+                value={filters.keyword}
+                onChange={(e) => setFilters({ ...filters, keyword: e.target.value })}
+              />
+              <select
+                value={filters.status}
+                onChange={(e) => setFilters({ ...filters, status: e.target.value })}
+              >
+                {STATUS_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={filters.deadlineWithinDays}
+                onChange={(e) =>
+                  setFilters({ ...filters, deadlineWithinDays: Number(e.target.value) })
+                }
+              >
+                <option value={0}>不限截止时间</option>
+                <option value={3}>3 天内截止</option>
+                <option value={7}>7 天内截止</option>
+                <option value={30}>30 天内截止</option>
+              </select>
+            </section>
+
             <section className="source-list">
               {events.length === 0 ? (
                 <p className="empty">还没有正式活动。先从 Review 里确认一个。</p>
@@ -381,6 +536,47 @@ export function App() {
                           .filter(Boolean)
                           .join(" · ") || "时间地点待补充"}
                       </p>
+                      <div className="inline-actions">
+                        <select
+                          className="status-select"
+                          value={event.status}
+                          disabled={busyId === event.id}
+                          onChange={(e) => updateEventStatus(event.id, e.target.value)}
+                        >
+                          {STATUS_OPTIONS.filter((o) => o.value).map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="link-button"
+                          onClick={() => loadEvidences(event.id)}
+                        >
+                          查看证据
+                        </button>
+                        <button
+                          type="button"
+                          className="link-button"
+                          onClick={() => checkDuplicates(event.id)}
+                        >
+                          检查重复
+                        </button>
+                      </div>
+                      {evidences.length > 0 ? (
+                        <ul className="evidence-list">
+                          {evidences.map((item) => (
+                            <li key={item.id}>
+                              <strong>{item.field_name}</strong>
+                              {item.evidence_text ? `：${item.evidence_text}` : ""}
+                              {item.confidence != null ? (
+                                <span className="confidence"> {formatScore(item.confidence)}</span>
+                              ) : null}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
                     </div>
                     <div className="row-actions">
                       <span className="status">{event.status}</span>
@@ -396,6 +592,28 @@ export function App() {
                 ))
               )}
             </section>
+
+            {duplicates.length > 0 && duplicateBaseId ? (
+              <section className="duplicate-panel">
+                <h3>可能重复的活动</h3>
+                {duplicates.map((candidate) => (
+                  <article className="duplicate-row" key={candidate.event.id}>
+                    <div>
+                      <strong>{candidate.event.title}</strong>
+                      <p>{candidate.match_reasons.join(" · ")}</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={busyId === candidate.event.id}
+                      onClick={() => mergeEvents(duplicateBaseId, candidate.event.id)}
+                    >
+                      合并进来
+                    </button>
+                  </article>
+                ))}
+              </section>
+            ) : null}
           </>
         ) : null}
 

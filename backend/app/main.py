@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.api.calendar import router as calendar_router
 from backend.app.api.events import router as events_router
+from backend.app.api.evidences import router as evidences_router
 from backend.app.api.reminders import router as reminders_router
 from backend.app.api.review import router as review_router
 from backend.app.api.source_items import router as source_items_router
@@ -37,6 +38,7 @@ app.add_middleware(
 app.include_router(source_items_router, prefix="/api/source-items", tags=["source-items"])
 app.include_router(review_router, prefix="/api/review-queue", tags=["review-queue"])
 app.include_router(events_router, prefix="/api/events", tags=["events"])
+app.include_router(evidences_router, prefix="/api/evidences", tags=["evidences"])
 app.include_router(reminders_router, prefix="/api/reminders", tags=["reminders"])
 app.include_router(user_preferences_router, prefix="/api/user-preferences", tags=["user-preferences"])
 app.include_router(calendar_router, prefix="/api/calendar", tags=["calendar"])
