@@ -7,6 +7,7 @@ Planbox is an early MVP for collecting event sources, reviewing extraction draft
 - [任务与文档入口](docs/task/README.md)：当前待办、下一步、问题、协作记录、建议与工程规范。
 - [下一阶段产品方案](docs/NEXT_PHASE_PLAN.md)：微信/小红书/图片输入、按目标筛选与行动规划。
 - [项目协作规则](AGENTS.md)：目录职责、检查入口、修改与提交边界。
+- [小程序接入与本地运行](docs/MINIPROGRAM.md)：原生小程序分享预填、正文粘贴与补全入口，源码在 `miniprogram/`。
 
 当前完成情况与历史验证边界见任务入口；规划文档不表示对应功能已经实现。
 

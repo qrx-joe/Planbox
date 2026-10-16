@@ -19,3 +19,6 @@ frontend/*.tsbuildinfo
 .testdata/
 .workbuddy/
 .wbapp_*.genie
+
+# 微信开发者工具生成的个人编译条件和本地设置。
+miniprogram/project.private.config.json

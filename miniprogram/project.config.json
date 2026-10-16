@@ -1,0 +1,12 @@
+{
+  "description": "Planbox 原生小程序分享与正文补全入口",
+  "projectname": "Planbox",
+  "compileType": "miniprogram",
+  "miniprogramRoot": "./",
+  "appid": "",
+  "setting": {
+    "es6": true,
+    "urlCheck": true,
+    "minified": true
+  }
+}

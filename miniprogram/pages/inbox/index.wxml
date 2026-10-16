@@ -1,0 +1,33 @@
+<view class="page">
+  <text class="eyebrow">PLANBOX · 收集入口</text>
+  <view class="heading">把正文收好，再核对信息</view>
+  <view class="description">这里接收分享者预置的参数。微信不会自动提供你正在阅读的文章正文。</view>
+
+  <view class="card">
+    <label for="title">标题（可选）</label>
+    <input id="title" value="{{title}}" bindinput="onTitleInput" maxlength="300" disabled="{{busy || finished}}" placeholder="活动或文章标题" />
+    <label for="article-url">文章链接（可选）</label>
+    <input id="article-url" value="{{articleUrl}}" bindinput="onUrlInput" maxlength="2000" disabled="{{busy || finished || pendingId}}" placeholder="分享参数会预填，也可手动粘贴" />
+    <view wx:if="{{summary}}" class="summary">
+      <text class="label">分享摘要</text>
+      <text selectable="true">{{summary}}</text>
+    </view>
+  </view>
+
+  <view class="card">
+    <label for="raw-text">文章正文</label>
+    <view class="description">在文章页复制正文，回到下方输入框长按粘贴。至少 50 字；正文将提交给配置的 Planbox 服务用于抽取。</view>
+    <textarea id="raw-text" value="{{rawText}}" bindinput="onTextInput" maxlength="200000" disabled="{{busy || finished}}" adjust-position="{{true}}" cursor-spacing="32" placeholder="在这里长按，粘贴完整正文…" />
+    <view class="counter">{{charCount}} 字 · 最少 50 字</view>
+  </view>
+
+  <view class="notice" role="status" aria-live="polite">{{hint}}</view>
+  <view wx:if="{{pendingId}}" class="receipt">
+    <text selectable="true">条目 ID：{{pendingId}}</text>
+    <text wx:if="{{extractionId}}" selectable="true">抽取 ID：{{extractionId}}</text>
+  </view>
+  <view wx:if="{{error}}" class="error" role="alert">{{error}}</view>
+  <button class="primary" bindtap="onSubmit" loading="{{busy}}" disabled="{{busy || finished}}">{{busy ? '正在提交，请稍候' : (finished ? '正文已保存' : (pendingId ? '提交正文并抽取' : '收集并继续'))}}</button>
+  <view wx:if="{{newShareAvailable}}" class="description">收到新的分享。当前内容保留，可在完成后载入新分享。</view>
+  <button class="secondary" bindtap="onStartNew" disabled="{{busy}}">{{newShareAvailable ? '载入新的分享' : '收集另一篇'}}</button>
+</view>

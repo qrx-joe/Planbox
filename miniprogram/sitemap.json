@@ -1,0 +1,4 @@
+{
+  "desc": "私有收集入口不参与搜索索引",
+  "rules": [{ "action": "disallow", "page": "*" }]
+}

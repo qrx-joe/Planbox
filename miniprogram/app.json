@@ -1,0 +1,10 @@
+{
+  "pages": ["pages/inbox/index"],
+  "window": {
+    "navigationBarTitleText": "Planbox 收集",
+    "navigationBarBackgroundColor": "#0f172a",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#0f172a"
+  },
+  "sitemapLocation": "sitemap.json"
+}

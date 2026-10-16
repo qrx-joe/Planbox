@@ -13,7 +13,7 @@
 
 所以正文必须由用户提供。唯一稳定路径是：**分享唤起拿标题做预填 → 用户复制粘贴正文**。
 
-这条链路本项目后端已完整实现，前端 Web 版也可直接用。
+本项目提供这条链路的后端接口、Web 入口，以及 `miniprogram/` 下的原生小程序入口。小程序当前只负责收集和补全；Review 仍在 Web 版完成。
 
 ---
 
@@ -22,14 +22,14 @@
 ```
 第 1 段  分享唤起
          POST /api/share/intake
-         └─ 尽力抓取文章正文（大概率失败，属正常）
+         └─ 若有文章链接，尽力抓取；失败时仍保存待补全条目
          └─ 返回 state = needs_content + 下一步指引
 
 第 2 段  粘贴正文
          POST /api/share/{source_item_id}/complete
          └─ 校验字数（至少 50 字）
-         └─ 写入正文，触发 AI 抽取
-         └─ 返回 extraction_id
+         └─ 写入正文，按 auto_extract 尝试抽取
+         └─ 返回 extraction_started；成功触发时可能返回 extraction_id
 ```
 
 ## 二、接口契约
@@ -90,132 +90,61 @@
 
 **幂等**：正文完全一致时重复提交返回成功但不重复抽取。
 
+`state=ready` 仅表示正文已保存。两接口都可能返回 `extraction_started=false`；不能仅凭 `ready` 或 intake 的 `next_action` 宣称生成了草稿。补全请求的正文上限为 200000 字，标题上限为 300 字；噪声清理后不足 50 字返回 HTTP 400，输入格式错误返回 422，条目不存在返回 404。
+
 ## 三、小程序端代码
 
-### app.js —— 捕获分享参数
+源码：[miniprogram](../miniprogram/)。使用原生 JS/WXML/WXSS，无 npm 运行依赖，无云开发或插件配置。
 
-```js
-App({
-  onLaunch(options) {
-    this.captureShare(options)
-  },
-
-  onShow(options) {
-    // 热启动时参数在 onShow，场景值 1155 表示从分享卡片进入
-    this.captureShare(options)
-  },
-
-  captureShare(options) {
-    if (!options || !options.query) return
-
-    const q = options.query.q || ''
-    this.globalData.sharePayload = {
-      scene: String(options.scene || ''),
-      query: q,
-      title: options.query.title || '',
-      summary: options.query.summary || '',
-      article_url: options.query.article_url || '',
-    }
-  },
-
-  globalData: { sharePayload: null },
-})
+```text
+miniprogram/
+  app.js / app.json / app.wxss       冷、热启动参数捕获与应用配置
+  project.config.json / sitemap.json 开发者工具导入与搜索配置
+  config.js                          本地 API 地址与 60000 毫秒超时
+  utils/share.js                     分享参数映射与容错解码
+  utils/api.js                       两个 POST、HTTP/网络错误处理
+  pages/inbox/index.{js,json,wxml,wxss} 收集与正文补全页面
 ```
 
-### pages/inbox/index.js —— 完整流程
+### 本地启动
 
-```js
-const BASE = 'https://your-domain.com'
+1. 从仓库根启动后端。默认配置使用 fake Provider；如本地 `.env` 已配置真实模型，则补全会按该配置调用模型。
 
-Page({
-  data: {
-    hint: '',
-    pendingId: '',
-    rawText: '',
-  },
+   ```powershell
+   uv sync --locked
+   uv run --locked python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+   ```
 
-  onLoad() {
-    const payload = getApp().globalData.sharePayload
-    if (!payload) return
+2. 微信开发者工具导入 **`miniprogram/` 目录**。共享 `project.config.json` 的 `appid` 留空：导入时由用户选择工具提供的测试号或填写自己的真实 AppID，不在仓库编造 AppID。
+3. [config.js](../miniprogram/config.js) 默认指向 `http://127.0.0.1:8000`，适用于本机开发者工具。在工具「详情 → 本地设置」临时关闭合法域名/TLS/HTTPS 校验才能访问这个本地 HTTP 地址。共享配置保留 `urlCheck=true`；个人工具配置已忽略，不提交。
+4. 真机的 `127.0.0.1` 指向手机自身，不能沿用本机地址。真机/发布前须由用户配置实际可达的服务地址和自己的合法 HTTPS 服务器域名；本仓库未配置线上域名。
 
-    // 分享标题先预填，正文仍需用户粘贴
-    this.setData({
-      hint: payload.title || '已接收分享参数',
-      rawText: payload.summary || '',
-    })
-    this.submitShare(payload)
-  },
+### 手动验收
 
-  async submitShare(payload) {
-    wx.showLoading({ title: '处理中' })
-    try {
-      const { data } = await wx.request({
-        url: `${BASE}/api/share/intake`,
-        method: 'POST',
-        data: payload,
-      })
+在开发者工具新增编译条件：启动页 `pages/inbox/index`，query 可使用以下**合成预填参数**，场景值用工具实际选择值。
 
-      if (data.state === 'needs_content') {
-        // 抓不到正文 —— 这是常态，不是错误
-        this.setData({
-          pendingId: data.source_item_id,
-          hint: data.next_action,
-        })
-      } else {
-        wx.showToast({ title: '已生成草稿', icon: 'success' })
-        this.fetchReviewQueue()
-      }
-    } catch (err) {
-      wx.showToast({ title: '提交失败', icon: 'none' })
-    } finally {
-      wx.hideLoading()
-    }
-  },
-
-  async complete(rawText) {
-    if (rawText.trim().length < 50) {
-      wx.showToast({ title: '正文太短', icon: 'none' })
-      return
-    }
-
-    wx.showLoading({ title: '补全中' })
-    try {
-      const { data } = await wx.request({
-        url: `${BASE}/api/share/${this.data.pendingId}/complete`,
-        method: 'POST',
-        data: { raw_text: rawText, auto_extract: true },
-      })
-      wx.showToast({ title: '已生成草稿', icon: 'success' })
-      this.setData({ pendingId: '' })
-      this.fetchReviewQueue()
-    } finally {
-      wx.hideLoading()
-    }
-  },
-})
+```text
+title=Planbox%E5%90%88%E6%88%90%E6%B4%BB%E5%8A%A8&summary=%E5%BE%85%E8%A1%A5%E6%AD%A3%E6%96%87
 ```
 
-### 让用户方便粘贴
+文章链接字段支持 `article_url` 或 `url`，也支持 `q` 内嵌 URL（后端解析）。`scene` 转字符串传给后端，`webview_url`/`webviewUrl` 只保留来源信息，不能当文章链接。平台不会自动附送文章标题，这些都是分享者预置的 query 字段。参数长度不符时按接口 422 提示处理，不悄悄截断原始内容。
 
-微信没有「读取剪贴板」的API（`wx.getClipboardData` 在部分场景受限制），推荐做法：
+- 冷启动/热启动预填标题、链接和摘要，摘要单独展示，不填入正文框；**不会自动 POST**。普通切回前台保留当前输入。新分享到来时保留旧正文，点击「载入新的分享」才切换；未提交输入清空前弹出确认。
+- 可直接打开空页面手动收集。点击「收集并继续」建立条目；`needs_content` 显示服务端指引，再长按 `textarea` 粘贴正文。也可先粘贴，再点一次串行完成建档与补全。未调用剪贴板读取 API。
+- 输入不足 50 字先阻止提交；服务端清理噪声后仍可返回 400。正在提交时禁用按钮，成功后锁定，避免连点重复创建；「收集另一篇」清空本页并开始新条目。
+- HTTP 400/404/422/5xx、网络超时、域名拒绝和异常响应显示在页面内；失败保留正文及已知条目 ID。请求不自动重试，补全的手动重试只发同一 ID 的 complete。
+- intake 没有幂等建档承诺；断网时结果可能未知，先去 Web 收集箱核对再重试。正文和条目 ID 仅在当前页面内存保留，关闭/重新编译后的恢复尚未实现。
+- `ready` 显示「正文已保存」，另按 `extraction_started` 告知是否触发抽取；展示可获得的 ID，提示用户去 Web Review 核对。不把重复正文或抽取失败写成「已生成草稿」。
 
-```js
-// 用户在按钮上长按 → 触发粘贴
-<button bindlongpress="onPaste">长按粘贴正文</button>
+### 定向回归
 
-onPaste() {
-  wx.getClipboardData({
-    success: (res) => {
-      this.setData({ rawText: res.data })
-    },
-    fail: () => {
-      wx.showToast({ title: '请手动粘贴', icon: 'none' })
-    },
-  })
-}
+从仓库根运行，无额外依赖、无真实模型调用：
+
+```powershell
+node --test tests/miniprogram.test.cjs
 ```
 
-也可以用 `textarea` 的 `adjust-position` 属性，聚焦时避免键盘遮挡。
+该测试运行真实 App/Page/API JS，替换微信宿主以覆盖参数、提交顺序、错误反馈和输入保留；不代表微信运行时编译、真机剪贴板、键盘遮挡或真实模型质量已验证。具体本轮结果见 [协作记录](task/communicating.md)。请求使用回调封装 Promise 并检查 HTTP 状态，参考 [微信官方 API 类型定义](https://github.com/wechat-miniprogram/api-typings/blob/master/types/wx/lib.wx.api.d.ts)；生命周期参考 [App 官方定义](https://github.com/wechat-miniprogram/api-typings/blob/master/types/wx/lib.wx.app.d.ts)。
 
 ## 四、微信后台配置清单
 
