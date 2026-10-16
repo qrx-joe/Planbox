@@ -18,3 +18,4 @@ frontend/*.tsbuildinfo
 .env.*
 .testdata/
 .workbuddy/
+.wbapp_*.genie
