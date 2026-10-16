@@ -48,6 +48,16 @@ class SourceItemUploadResponse(BaseModel):
     created_at: str
 
 
+class WechatFetchRequest(BaseModel):
+    """抓取请求。
+
+    链接走请求体而非查询参数：URL 里出现完整外链会被 CDN 层的
+    WAF 判定为开放重定向或 SSRF 特征直接拦截。
+    """
+
+    source_url: str = Field(min_length=1, max_length=2000)
+
+
 class WechatFetchResponse(BaseModel):
     """抓取结果。
 

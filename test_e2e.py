@@ -76,6 +76,27 @@ def call(method, path, payload=None):
             return exc.code, body
 
 
+def call_raw(method, path, raw_body, content_type):
+    """发原始字节请求，用于 multipart 上传这类不能用 JSON 的场景。"""
+    url = urllib.parse.quote(f"{BASE}{path}", safe=":/?&=%")
+    req = urllib.request.Request(
+        url,
+        data=raw_body,
+        method=method,
+        headers={"Content-Type": content_type},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode()
+            return resp.status, (json.loads(body) if body else None)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode()
+        try:
+            return exc.code, json.loads(body)
+        except json.JSONDecodeError:
+            return exc.code, body
+
+
 def check(name, condition, detail=""):
     global passed, failed
     if condition:
@@ -571,7 +592,8 @@ check("直接触发抽取", isinstance(ready, dict) and ready.get("extraction_st
 # 12.11 旧的 fetch 接口降级而非报错
 code, fetched = call(
     "POST",
-    "/api/source-items/fetch?source_url=https%3A%2F%2Fmp.weixin.qq.com%2Fs%2Ffakeid000",
+    "/api/source-items/fetch",
+    {"source_url": "https://mp.weixin.qq.com/s/fakeid000"},
 )
 check("抓取接口不再抛 422", code == 200, f"实际 {code} {str(fetched)[:120]}")
 check(
@@ -584,10 +606,60 @@ check(
     isinstance(fetched, dict) and "id" in (fetched.get("source_item") or {}),
 )
 
-code, notwx = call("POST", "/api/source-items/fetch?source_url=https%3A%2F%2Fexample.com%2Fx")
+code, notwx = call("POST", "/api/source-items/fetch", {"source_url": "https://example.com/x"})
 check("非微信链接仍返回 400", code == 400)
 
-print("\n[13] 数据库完整性")
+print("\n[13] 文件上传")
+
+boundary = "----planboxtest"
+small = (
+    f"--{boundary}\r\n"
+    f'Content-Disposition: form-data; name="file"; filename="ok.png"\r\n'
+    f"Content-Type: image/png\r\n\r\n"
+).encode() + b"\x89PNG\r\n\x1a\n" * 4 + f"\r\n--{boundary}--\r\n".encode()
+
+code, asset = call_raw(
+    "POST",
+    f"/api/source-items/{share_id}/assets",
+    raw_body=small,
+    content_type=f"multipart/form-data; boundary={boundary}",
+)
+check("正常大小上传成功", code in (200, 201), f"实际 {code} {str(asset)[:120]}")
+check("返回 asset id", isinstance(asset, dict) and "id" in (asset or {}))
+
+# 11 MB，超过默认 10 MB 上限
+big = (
+    f"--{boundary}\r\n"
+    f'Content-Disposition: form-data; name="file"; filename="big.bin"\r\n'
+    f"Content-Type: application/octet-stream\r\n\r\n"
+).encode() + b"x" * (11 * 1024 * 1024) + f"\r\n--{boundary}--\r\n".encode()
+
+code, big_resp = call_raw(
+    "POST",
+    f"/api/source-items/{share_id}/assets",
+    raw_body=big,
+    content_type=f"multipart/form-data; boundary={boundary}",
+)
+check(
+    "超大上传被拒 413",
+    code == 413,
+    f"实际 {code}（连接被重置说明没读body，会触发 TCP RST）",
+)
+check(
+    "413 返回可读 JSON 而非断连",
+    isinstance(big_resp, dict) and "MB" in str(big_resp.get("detail", "")),
+    f"实际 {str(big_resp)[:120]}",
+)
+
+code, nf = call_raw(
+    "POST",
+    "/api/source-items/nonexistent/assets",
+    raw_body=small,
+    content_type=f"multipart/form-data; boundary={boundary}",
+)
+check("上传到不存在的条目 404", code == 404, f"实际 {code}")
+
+print("\n[14] 数据库完整性")
 conn = sqlite3.connect(str(TEST_DIR / "e2e.db"))
 # 只查已确认草稿的证据——pending_review 尚未入库，event_id 为 NULL 是正确的
 orphan = conn.execute(

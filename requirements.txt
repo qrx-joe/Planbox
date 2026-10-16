@@ -1,0 +1,10 @@
+# 部署平台使用此文件安装依赖。
+# 与 pyproject.toml 保持一致，改动时两处都要改。
+fastapi>=0.115.0
+httpx>=0.28.1
+pydantic>=2.8.0
+pydantic-settings>=2.4.0
+python-multipart>=0.0.9
+requests>=2.34.2
+tzdata>=2025.2
+uvicorn[standard]>=0.30.0

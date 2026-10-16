@@ -6,6 +6,7 @@ from backend.app.schemas.source_item import (
     SourceItemCreate,
     SourceItemRead,
     SourceItemUploadResponse,
+    WechatFetchRequest,
     WechatFetchResponse,
 )
 from backend.app.services.extraction_service import ExtractionService
@@ -27,13 +28,17 @@ def create_source_item(payload: SourceItemCreate) -> SourceItemRead:
 
 
 @router.post("/fetch", response_model=WechatFetchResponse)
-async def fetch_and_create_wechat_article(source_url: str) -> WechatFetchResponse:
+async def fetch_and_create_wechat_article(payload: WechatFetchRequest) -> WechatFetchResponse:
     """微信公众号文章抓取 + 自动入库。
 
     **注意**：微信对非客户端请求有风控，服务器直连经常抓不到。
     抓取失败时不报错，而是返回 status=needs_content 的条目，
     引导用户回文章页复制正文后补全——这是预期行为。
+
+    文章链接从请求体读取而非查询参数：URL 里出现完整外链
+    会被 CDN 层的 WAF 当作开放重定向/SSRF 特征直接拦截（403）。
     """
+    source_url = payload.source_url
     if not is_wechat_url(source_url):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -118,11 +123,21 @@ async def request_extraction(source_item_id: str) -> ExtractionResultRead:
     return await extraction_service.extract(source_item_id)
 
 
-@router.post("/{source_item_id}/assets", response_model=SourceItemUploadResponse)
-async def upload_source_asset(source_item_id: str, file: UploadFile) -> SourceItemUploadResponse:
+@router.post(
+    "/{source_item_id}/assets",
+    response_model=SourceItemUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_source_asset(
+    source_item_id: str, file: UploadFile
+) -> SourceItemUploadResponse:
     item = service.get(source_item_id)
     if item is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source item not found")
 
-    asset = await service.save_asset(source_item_id, file)
-    return asset
+    try:
+        return await service.save_asset(source_item_id, file)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)
+        ) from exc

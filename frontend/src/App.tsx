@@ -309,19 +309,22 @@ export function App() {
       // 微信文章链接走专门的抓取接口
       const isWechatUrl = sourceUrl.includes("mp.weixin.qq.com");
       const endpoint = isWechatUrl
-        ? `${API_BASE_URL}/api/source-items/fetch?source_url=${encodeURIComponent(sourceUrl)}`
+        ? `${API_BASE_URL}/api/source-items/fetch`
         : `${API_BASE_URL}/api/source-items`;
-      const body = isWechatUrl
-        ? null
-        : JSON.stringify({
-            source_type: sourceUrl ? "web" : "text",
-            source_url: sourceUrl || null,
-            raw_text: rawText || null,
-          });
+      // 抓取接口的链接走请求体：URL 里带完整外链会被 CDN 层 WAF 拦成403
+      const body = JSON.stringify(
+        isWechatUrl
+          ? { source_url: sourceUrl }
+          : {
+              source_type: sourceUrl ? "web" : "text",
+              source_url: sourceUrl || null,
+              raw_text: rawText || null,
+            }
+      );
 
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: body ? { "Content-Type": "application/json" } : undefined,
+        headers: { "Content-Type": "application/json" },
         body,
       });
       if (!response.ok) {

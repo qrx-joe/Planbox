@@ -114,7 +114,23 @@ class SourceService:
     def mark_extract_pending(self, source_item_id: str) -> None:
         self.repository.update_parse_status(source_item_id, "pending", now_iso())
 
-    async def save_asset(self, source_item_id: str, file: UploadFile) -> SourceItemUploadResponse:
+    async def save_asset(
+        self, source_item_id: str, file: UploadFile
+    ) -> SourceItemUploadResponse:
+        # 读之前先看声明大小，能提前拒绝就不用占用内存
+        declared = file.size or 0
+        if declared > settings.max_upload_bytes:
+            raise ValueError(
+                f"文件超过上限 {settings.max_upload_bytes // (1024 * 1024)} MB"
+            )
+
+        contents = await file.read()
+        # chunked 传输时 Content-Length 不可信，实际字节数才是准的
+        if len(contents) > settings.max_upload_bytes:
+            raise ValueError(
+                f"文件超过上限 {settings.max_upload_bytes // (1024 * 1024)} MB"
+            )
+
         timestamp = now_iso()
         asset_id = new_id("asset")
         suffix = Path(file.filename or "").suffix
@@ -122,14 +138,15 @@ class SourceService:
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"{asset_id}{suffix}"
 
-        contents = await file.read()
         target_path.write_bytes(contents)
 
         row = self.repository.create_asset(
             {
                 "id": asset_id,
                 "source_item_id": source_item_id,
-                "asset_type": "image" if (file.content_type or "").startswith("image/") else "file",
+                "asset_type": (
+                    "image" if (file.content_type or "").startswith("image/") else "file"
+                ),
                 "file_path": str(target_path),
                 "original_filename": file.filename,
                 "mime_type": file.content_type,

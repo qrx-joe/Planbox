@@ -55,8 +55,10 @@ class WechatArticleFetcher:
     - 长链接 (含 biz, fid, mid, idx 参数)
     """
 
-    def __init__(self, timeout: int = 30):
-        self.timeout = timeout
+    def __init__(self, timeout: int | None = None):
+        from backend.app.core.config import settings
+
+        self.timeout = timeout or settings.wechat_fetch_timeout
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
