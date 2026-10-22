@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from backend.app.core.ids import new_id
-from backend.app.core.time import now_iso, now_shanghai
+from backend.app.core.temporal import TimeValueError, parse_time
+from backend.app.core.time import now_iso
 from backend.app.providers.llm import BaseLLMProvider, FakeLLMProvider, OpenAIProvider
 from backend.app.repositories.extraction_repository import (
     ExtractionRepository,
@@ -61,6 +63,18 @@ class ExtractionService:
             draft = self._rule_based_extract(source)
         else:
             draft = await self._llm_extract(provider, text, url)
+
+        # 参照来自实际来源记录；仍不自动推断跨年或相对日期。
+        for reference_kind in ("published_at", "captured_at"):
+            reference = source.get(reference_kind)
+            try:
+                parse_time(reference)
+            except TimeValueError:
+                continue
+            draft.time_issues = [replace(
+                issue, reference_at=reference, reference_kind=reference_kind
+            ) for issue in draft.time_issues]
+            break
 
         result_id = new_id("ext")
         row = self.extraction_repository.create(
@@ -273,21 +287,29 @@ class ExtractionService:
         return None
 
     def _guess_deadline(self, text: str) -> tuple[str | None, str | None]:
+        """仅提取明确截止片段；缺年/时区保留原值，日期不补截止时刻。"""
         pattern = re.compile(
-            r"(报名截止|截止报名|截止时间|报名时间).*?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?"
-            r"(?:\s*(\d{1,2})[:：](\d{2}))?",
-            re.S,
+            r"(?:报名截止|截止报名|截止时间)\s*[:：]?\s*"
+            r"(?P<day>(?:(?P<year>\d{4})[年./-])?"
+            r"(?P<month>\d{1,2})[月./-](?P<date>\d{1,2})[日号]?|今天|明天|后天|下周[一二三四五六日天])"
+            r"(?:[Tt\s]*(?P<hour>\d{1,2})[:：](?P<minute>\d{2})"
+            r"(?::(?P<second>\d{2}))?(?P<offset>Z|[+-]\d{2}:\d{2})?)?"
         )
         match = pattern.search(text)
         if not match:
             return None, None
 
-        year = now_shanghai().year
-        month = int(match.group(2))
-        day = int(match.group(3))
-        hour = int(match.group(4) or 23)
-        minute = int(match.group(5) or 59)
-        value = f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:00+08:00"
+        if not match.group("year"):
+            return text[match.start("day"):match.end()], match.group(0)[:160]
+        value = (
+            f"{int(match.group('year')):04d}-{int(match.group('month')):02d}-"
+            f"{int(match.group('date')):02d}"
+        )
+        if match.group("hour") is not None:
+            value += (
+                f"T{int(match.group('hour')):02d}:{int(match.group('minute')):02d}:"
+                f"{int(match.group('second') or 0):02d}{match.group('offset') or ''}"
+            )
         return value, match.group(0)[:160]
 
     def _guess_location(self, text: str) -> str | None:
@@ -326,4 +348,3 @@ class ExtractionService:
             source_text=row.get("source_text"),  # type: ignore[arg-type]
             source_type=str(row["source_type"]),
         )
-

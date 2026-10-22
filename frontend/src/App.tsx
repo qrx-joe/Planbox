@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useState } from "react";
+import { deadlineStatus, formatRelativeDate, timeReviewMessage, type TimeIssue } from "./time";
 
 type View = "inbox" | "review" | "activities" | "brief";
 
@@ -69,6 +70,7 @@ type ExtractedEventDraft = {
   is_online?: boolean | null;
   missing_fields: string[];
   confidence: number;
+  time_issues?: TimeIssue[];
 };
 
 type ReviewQueueItem = {
@@ -95,6 +97,7 @@ type EventItem = {
   location?: string | null;
   registration_url?: string | null;
   confidence?: number | null;
+  time_issues?: TimeIssue[];
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
@@ -683,6 +686,11 @@ export function App() {
                         缺失字段：{item.extraction.missing_fields.join("、")}
                       </p>
                     ) : null}
+                    {item.extraction.extracted.time_issues?.length ? (
+                      <p className="missing" role="status">
+                        时间待核对：{timeReviewMessage(item.extraction.extracted.time_issues)}
+                      </p>
+                    ) : null}
                     <div className="composer-actions">
                       <button
                         type="button"
@@ -790,6 +798,9 @@ export function App() {
                           检查重复
                         </button>
                       </div>
+                      {event.time_issues?.length ? (
+                        <p className="missing">时间待核对：{timeReviewMessage(event.time_issues)}</p>
+                      ) : null}
                       {evidences.length > 0 ? (
                         <ul className="evidence-list">
                           {evidences.map((item) => (
@@ -901,22 +912,14 @@ function BriefView({
   reviewItems: ReviewQueueItem[];
 }) {
   const now = new Date();
-  const threeDaysLater = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
-
-  const urgentEvents = events.filter((e) => {
-    if (!e.registration_deadline_at) return false;
-    const deadline = new Date(e.registration_deadline_at);
-    return deadline <= threeDaysLater && deadline >= now;
-  });
+  const urgentEvents = events.filter((e) => deadlineStatus(e.registration_deadline_at, now) === "urgent");
 
   const missingInfoEvents = events.filter((e) =>
-    [e.registration_deadline_at, e.event_start_at, e.location].some((v) => !v)
+    [e.registration_deadline_at, e.event_start_at, e.location].some((v) => !v) ||
+    Boolean(e.time_issues?.length)
   );
 
-  const expiredEvents = events.filter((e) => {
-    if (!e.registration_deadline_at) return false;
-    return new Date(e.registration_deadline_at) < now;
-  });
+  const expiredEvents = events.filter((e) => deadlineStatus(e.registration_deadline_at, now) === "expired");
 
   return (
     <section className="brief-view">
@@ -943,11 +946,11 @@ function BriefView({
       )}
 
       {missingInfoEvents.length > 0 && (
-        <BriefSection icon={<Star size={18} />} title="信息缺失" variant="info">
+        <BriefSection icon={<Star size={18} />} title="信息待核对" variant="info">
           {missingInfoEvents.map((e) => (
             <div key={e.id} className="brief-item">
               <span className="brief-title">{e.title}</span>
-              <span className="brief-meta">待补充关键信息</span>
+              <span className="brief-meta">{e.time_issues?.length ? "时间待核对" : "待补充关键信息"}</span>
             </div>
           ))}
         </BriefSection>
@@ -994,16 +997,4 @@ function BriefSection({
       <div className="brief-list">{children}</div>
     </article>
   );
-}
-
-function formatRelativeDate(dateStr: string): string {
-  const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = date.getTime() - now.getTime();
-  const diffDays = Math.ceil(diffMs / (24 * 60 * 60 * 1000));
-
-  if (diffDays === 0) return "今天";
-  if (diffDays === 1) return "明天";
-  if (diffDays < 0) return "已过期";
-  return `${diffDays}天后`;
 }

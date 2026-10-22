@@ -15,6 +15,7 @@ import json
 import re
 from datetime import datetime
 
+from backend.app.core.temporal import validate_event_times
 from backend.app.core.time import now_iso
 from backend.app.repositories.event_repository import EventQuery, EventRepository
 from backend.app.repositories.evidence_repository import EvidenceRepository
@@ -115,6 +116,9 @@ class DedupService:
         if merged_schedule != target_schedule:
             updates["schedule_json"] = json.dumps(merged_schedule, ensure_ascii=False)
             filled_fields.append("schedule")
+
+        # 合并也可能拼出倒置区间；必须在任何证据/来源写入前校验。
+        validate_event_times({**target, **updates, "schedule": merged_schedule})
 
         # 证据补全：target 缺失或 source 更可信时采纳 source 的证据
         merged_confidence = self._backfill_evidences(target_id, source_id)

@@ -28,14 +28,24 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
         "registration_url": {"type": "string", "description": "报名链接"},
         "registration_start_at": {
             "type": "string",
-            "description": "报名开始时间，ISO 8601 格式（如 2026-06-01T09:00:00+08:00），无则 null",
+            "description": (
+                "报名开始：完整日期或带明确时区的 ISO 时刻；"
+                "不完整保留原片段，无则 null"
+            ),
         },
         "registration_deadline_at": {
             "type": "string",
-            "description": "报名截止时间，ISO 8601 格式（如 2026-06-01T23:59:00+08:00），无则 null",
+            "description": (
+                "报名截止：完整日期或带明确时区的 ISO 时刻；"
+                "不完整保留原片段，无则 null"
+            ),
         },
-        "event_start_at": {"type": "string", "description": "活动开始时间，ISO 8601 格式，无则 null"},
-        "event_end_at": {"type": "string", "description": "活动结束时间，ISO 8601 格式，无则 null"},
+        "event_start_at": {
+            "type": "string", "description": "活动开始日期/带时区时刻，无则 null",
+        },
+        "event_end_at": {
+            "type": "string", "description": "活动结束日期/带时区时刻，无则 null",
+        },
         "location": {"type": "string", "description": "活动地点（城市名），线上活动设为 '线上'，无则 null"},
         "is_online": {"type": "boolean", "description": "是否线上活动，不确定则 null"},
         "schedule": {
@@ -45,8 +55,12 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "节点名称"},
-                    "start_at": {"type": "string", "description": "开始时间 ISO 8601"},
-                    "end_at": {"type": "string", "description": "结束时间 ISO 8601"},
+                    "start_at": {
+                        "type": "string", "description": "开始日期或带时区时刻；不完整则原片段",
+                    },
+                    "end_at": {
+                        "type": "string", "description": "结束日期或带时区时刻；不完整则原片段",
+                    },
                 },
             },
         },
@@ -78,7 +92,9 @@ SYSTEM_PROMPT = """你是一个活动信息结构化抽取专家。用户会提�
 1. 只输出纯 JSON，不要 ```json 标记
 2. 字段缺失时，值设为 null（不要用空字符串）
 3. 不要编造信息，只基于原文抽取
-4. 时间必须用 ISO 8601 格式带时区（如 2026-06-01T23:59:00+08:00），原文只有日期则补 23:59:00
+4. 时间保持原文精度：只有完整日期输出 YYYY-MM-DD；有明确时区的时刻才输出带偏移的 ISO 时间。
+   缺年份、相对时间或缺时区时保留对应原片段供人工核对，不猜年份或时区。
+   报名与举办日期均不能补 23:59、午夜或默认结束时长；未知时间设 null。
 5. event_type 可选值：hackathon, competition, salon, bootcamp, conference, workshop, other
 6. missing_fields 列出所有原文未提供但对参加活动很重要的字段
 7. confidence 表示你对抽取结果的整体信心，0-1之间

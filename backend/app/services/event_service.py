@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from backend.app.core.ids import new_id
+from backend.app.core.temporal import TIME_FIELDS, validate_event_times
 from backend.app.core.time import now_iso
 from backend.app.repositories.event_repository import EventQuery, EventRepository
 from backend.app.repositories.extraction_repository import (
@@ -48,6 +49,7 @@ class EventService:
         draft = payload.extracted or ExtractedEventDraft.model_validate(
             loads_json(str(extraction["extracted_json"]), {})
         )
+        validate_event_times(draft.model_dump())
 
         timestamp = now_iso()
         event_id = new_id("evt")
@@ -190,6 +192,12 @@ class EventService:
 
     def update(self, event_id: str, payload: EventUpdate) -> EventRead:
         values = payload.to_column_values()
+        if set(values).intersection((*TIME_FIELDS, "schedule_json")):
+            row = self.event_repository.get_or_raise(event_id)
+            candidate = {**row, **values}
+            candidate["schedule"] = loads_json(candidate.get("schedule_json"), [])
+            # 时间校验必须早于状态写入，拒绝时不留下部分更新。
+            validate_event_times(candidate)
 
         if "status" in values and values["status"] is not None:
             status_value = str(values.pop("status"))

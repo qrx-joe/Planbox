@@ -1,61 +1,111 @@
-from datetime import UTC, datetime, timedelta
+"""ICS 导出：保留日期精度，任何待核对条目均需明确处理，不生成残缺文件。"""
 
+from datetime import UTC, date, datetime, timedelta
+
+from backend.app.core.temporal import MESSAGES, inspect_event_times, parse_time
 from backend.app.schemas.event import EventRead
+
+
+class CalendarTimeError(ValueError):
+    """导出核对清单只包含实体 ID、字段与原因，不泄漏标题/来源原文。"""
+
+    def __init__(self, issues: list[dict[str, str]]):
+        self.issues = issues
+        super().__init__("存在待核对时间，请修正后重新导出")
 
 
 class CalendarService:
     def export_events(self, events: list[EventRead]) -> str:
+        """返回 CRLF/UTF-8 的完整 ICS；有问题时抛 CalendarTimeError，无存储副作用。"""
+        components: list[str] = []
+        issues: list[dict[str, str]] = []
+        for event in events:
+            problems = inspect_event_times(event.model_dump())
+            if problems:
+                issues.extend(
+                    {"event_id": event.id, "field": issue.field, "reason": MESSAGES[issue.code]}
+                    for issue in problems
+                )
+                continue
+            try:
+                parts = self._event_to_components(event)
+            except (ValueError, OverflowError):
+                issues.append(
+                    {
+                        "event_id": event.id,
+                        "field": "event_time",
+                        "reason": "时间超出日历可表达范围",
+                    }
+                )
+                continue
+            if not parts:
+                issues.append(
+                    {
+                        "event_id": event.id,
+                        "field": "event_time",
+                        "reason": "尚无可导出的确定日期或时刻",
+                    }
+                )
+            for index, node in enumerate(event.schedule):
+                if not node.get("start_at") and not node.get("end_at"):
+                    issues.append(
+                        {
+                            "event_id": event.id,
+                            "field": f"schedule.{index}",
+                            "reason": "赛程节点尚无确定日期或时刻",
+                        }
+                    )
+            components.extend(parts)
+        if issues:
+            raise CalendarTimeError(issues)
         lines = [
             "BEGIN:VCALENDAR",
             "VERSION:2.0",
             "PRODID:-//Planbox//AI Activity Opportunity Manager//CN",
             "CALSCALE:GREGORIAN",
             "METHOD:PUBLISH",
+            *components,
+            "END:VCALENDAR",
         ]
-        for event in events:
-            lines.extend(self._event_to_components(event))
-        lines.append("END:VCALENDAR")
-        return "\r\n".join(lines) + "\r\n"
+        return "\r\n".join(self._fold(line) for line in lines) + "\r\n"
 
     def _event_to_components(self, event: EventRead) -> list[str]:
         components: list[str] = []
-        if event.registration_deadline_at:
+
+        def add(uid: str, summary: str, start: str, end: str | None = None) -> None:
             components.extend(
                 self._build_component(
-                    uid=f"{event.id}-registration-deadline@planbox",
-                    summary=f"报名截止：{event.title}",
-                    start_at=event.registration_deadline_at,
-                    end_at=None,
-                    description=self._description(event),
-                    location=event.location,
+                    uid, summary, start, end, self._description(event), event.location
                 )
             )
+
+        for field, label, suffix in (
+            (event.registration_start_at, "报名开始", "registration-start"),
+            (event.registration_deadline_at, "报名截止", "registration-deadline"),
+        ):
+            if field:
+                add(f"{event.id}-{suffix}@planbox", f"{label}：{event.title}", field)
         if event.event_start_at:
-            components.extend(
-                self._build_component(
-                    uid=f"{event.id}-event-time@planbox",
-                    summary=f"活动开始：{event.title}",
-                    start_at=event.event_start_at,
-                    end_at=event.event_end_at,
-                    description=self._description(event),
-                    location=event.location,
-                )
+            add(
+                f"{event.id}-event-time@planbox",
+                f"活动开始：{event.title}",
+                event.event_start_at,
+                event.event_end_at,
             )
+        elif event.event_end_at:
+            add(f"{event.id}-event-end@planbox", f"活动结束：{event.title}", event.event_end_at)
         for index, node in enumerate(event.schedule):
-            start_at = node.get("start_at")
-            if not start_at:
-                continue
-            name = node.get("name") or "赛程节点"
-            components.extend(
-                self._build_component(
-                    uid=f"{event.id}-schedule-{index}@planbox",
-                    summary=f"{name}：{event.title}",
-                    start_at=start_at,
-                    end_at=node.get("end_at"),
-                    description=self._description(event),
-                    location=event.location,
+            start = node.get("start_at") or node.get("end_at")
+            if start:
+                label = node.get("name") or "赛程节点"
+                if not node.get("start_at"):
+                    label += "结束"
+                add(
+                    f"{event.id}-schedule-{index}@planbox",
+                    f"{label}：{event.title}",
+                    start,
+                    node.get("end_at") if node.get("start_at") else None,
                 )
-            )
         return components
 
     def _build_component(
@@ -67,14 +117,25 @@ class CalendarService:
         description: str,
         location: str | None,
     ) -> list[str]:
-        start = self._parse_datetime(start_at)
-        end = self._parse_datetime(end_at) if end_at else start + timedelta(minutes=30)
+        start = parse_time(start_at)
+        end = parse_time(end_at) if end_at else None
+        time_lines: list[str]
+        if isinstance(start, datetime):
+            time_lines = [f"DTSTART:{self._format_utc(start)}"]
+            if isinstance(end, datetime):
+                time_lines.append(f"DTEND:{self._format_utc(end)}")
+        else:
+            time_lines = [f"DTSTART;VALUE=DATE:{start.strftime('%Y%m%d')}"]
+            if isinstance(end, date):
+                # 主办方区间含结束日；ICS DTEND 排他，需转换成下一日。
+                time_lines.append(
+                    f"DTEND;VALUE=DATE:{(end + timedelta(days=1)).strftime('%Y%m%d')}"
+                )
         return [
             "BEGIN:VEVENT",
             f"UID:{self._escape(uid)}",
             f"DTSTAMP:{self._format_utc(datetime.now(UTC))}",
-            f"DTSTART:{self._format_utc(start)}",
-            f"DTEND:{self._format_utc(end)}",
+            *time_lines,
             f"SUMMARY:{self._escape(summary)}",
             f"DESCRIPTION:{self._escape(description)}",
             f"LOCATION:{self._escape(location or '')}",
@@ -90,22 +151,28 @@ class CalendarService:
         ]
         return "\n".join(part for part in parts if part)
 
-    def _parse_datetime(self, value: str | None) -> datetime:
-        if not value:
-            raise ValueError("Calendar datetime is required")
-        normalized = value.replace("Z", "+00:00")
-        parsed = datetime.fromisoformat(normalized)
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=UTC)
-        return parsed
-
     def _format_utc(self, value: datetime) -> str:
         return value.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
 
     def _escape(self, value: str) -> str:
+        normalized = value.replace("\r\n", "\n").replace("\r", "\n")
         return (
-            value.replace("\\", "\\\\")
+            normalized.replace("\\", "\\\\")
             .replace("\n", "\\n")
             .replace(",", "\\,")
             .replace(";", "\\;")
         )
+
+    def _fold(self, line: str) -> str:
+        """每物理行最多 75 octets；续行空格计入长度，不截断 UTF-8 字符。"""
+        parts: list[str] = []
+        current = ""
+        size = 0
+        for character in line:
+            width = len(character.encode("utf-8"))
+            if size + width > 75:
+                parts.append(current)
+                current, size = " ", 1
+            current += character
+            size += width
+        return "\r\n".join([*parts, current])

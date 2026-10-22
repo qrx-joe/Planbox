@@ -1,6 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from backend.app.core.temporal import TimeIssue, inspect_event_times
 
 ExtractionStatus = Literal["pending_review", "confirmed", "rejected"]
 
@@ -31,6 +33,20 @@ class ExtractedEventDraft(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.5, ge=0, le=1)
     evidences: list[EvidenceDraft] = Field(default_factory=list)
+    time_issues: list[TimeIssue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def flag_unresolved_times(self) -> "ExtractedEventDraft":
+        """草稿保留原始时间供纠错；重新计算问题，不能信任模型自报已经核对。"""
+        previous = {(issue.field, issue.code, issue.raw_value): issue for issue in self.time_issues}
+        self.time_issues = [
+            previous.get((issue.field, issue.code, issue.raw_value), issue)
+            for issue in inspect_event_times(self.model_dump())
+        ]
+        self.missing_fields = list(dict.fromkeys(
+            [*self.missing_fields, *(issue.field for issue in self.time_issues)]
+        ))
+        return self
 
 
 class ExtractionResultRead(BaseModel):
@@ -50,4 +66,3 @@ class ReviewQueueItem(BaseModel):
     source_url: str | None = None
     source_text: str | None = None
     source_type: str
-

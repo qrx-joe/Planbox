@@ -1,8 +1,9 @@
 import json
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from backend.app.core.temporal import TimeIssue, inspect_event_times, validate_event_times
 from backend.app.schemas.extraction import ExtractedEventDraft
 
 # PRD 8.6 定义的活动状态全集
@@ -73,6 +74,12 @@ class EventUpdate(BaseModel):
     status: EventStatus | None = None
     notes: str | None = None
 
+    @model_validator(mode="after")
+    def validate_submitted_times(self) -> "EventUpdate":
+        """提交字段先校验，另一半已存区间由用例层合并校验。"""
+        validate_event_times(self.model_dump(exclude_unset=True))
+        return self
+
     def to_column_values(self) -> dict[str, object]:
         """转换为可直接写入 events 表的列值，只包含显式提供的字段。"""
         data = self.model_dump(exclude_unset=True)
@@ -110,6 +117,13 @@ class EventRead(BaseModel):
     notes: str | None = None
     created_at: str
     updated_at: str
+    time_issues: list[TimeIssue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def flag_legacy_times(self) -> "EventRead":
+        """旧记录仍可读取；附加问题清单，避免一次非法日期拖垮整个列表。"""
+        self.time_issues = inspect_event_times(self.model_dump())
+        return self
 
 
 class EventListResponse(BaseModel):

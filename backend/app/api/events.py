@@ -1,6 +1,7 @@
 
 from fastapi import APIRouter, HTTPException, Query, status
 
+from backend.app.core.temporal import TimeValidationError
 from backend.app.repositories.event_repository import EventQuery
 from backend.app.schemas.event import (
     DuplicateCheckResponse,
@@ -50,23 +51,27 @@ def list_events(
 
     默认返回分页结构 {items, total}；传 paginated=false 时返回纯数组，兼容旧客户端。
     """
-    query = EventQuery(
-        status=status_filter,
-        keyword=keyword,
-        event_type=event_type,
-        is_online=is_online,
-        location=location,
-        deadline_before=deadline_before,
-        deadline_after=deadline_after,
-        event_start_after=event_start_after,
-        event_start_before=event_start_before,
-        only_actionable=only_actionable,
-        has_missing_fields=has_missing_fields,
-        sort=sort,
-        order=order,
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        query = EventQuery(
+            status=status_filter,
+            keyword=keyword,
+            event_type=event_type,
+            is_online=is_online,
+            location=location,
+            deadline_before=deadline_before,
+            deadline_after=deadline_after,
+            event_start_after=event_start_after,
+            event_start_before=event_start_before,
+            only_actionable=only_actionable,
+            has_missing_fields=has_missing_fields,
+            sort=sort,
+            order=order,
+            limit=limit,
+            offset=offset,
+        )
+    except (TimeValidationError, OverflowError) as exc:
+        detail = str(exc) if isinstance(exc, TimeValidationError) else "日期超出可查询范围"
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
     if paginated:
         return service.list_paginated(query)
     return service.list(query)
@@ -107,6 +112,8 @@ def update_event(event_id: str, payload: EventUpdate) -> EventRead:
     except KeyError as exc:
         raise _not_found() from exc
     except EventStatusError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except TimeValidationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 

@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+import sqlite3
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+from backend.app.core.config import settings
+from backend.app.core.temporal import (
+    TimeIssue,
+    TimeValidationError,
+    TimeValueError,
+    date_value,
+    parse_time,
+    precise_epoch,
+    time_sort_key,
+)
 from backend.app.db.database import connect
 
 # 允许按这些字段排序，必须是 events 表真实列名，防止 SQL 注入
@@ -18,6 +32,27 @@ DEFAULT_ORDER = """
   registration_deadline_at ASC,
   created_at DESC
 """
+
+
+def _bound(value: str, field: str) -> date | datetime:
+    try:
+        return parse_time(value)
+    except TimeValueError as exc:
+        raise TimeValidationError([TimeIssue(field, exc.code, value)]) from exc
+
+
+def _day_start(value: date) -> float:
+    return datetime.combine(value, time.min, ZoneInfo(settings.timezone)).timestamp()
+
+
+def _configure_time_functions(connection: sqlite3.Connection) -> None:
+    """只给活动查询连接注册纯解析函数；旧值保持不变，无迁移/网络副作用。"""
+    connection.create_function("event_time_epoch", 1, precise_epoch, deterministic=True)
+    connection.create_function("event_date", 1, date_value, deterministic=True)
+    connection.create_function(
+        "event_time_sort", 1,
+        lambda value: time_sort_key(value, settings.timezone), deterministic=True,
+    )
 
 
 class EventQuery:
@@ -57,6 +92,18 @@ class EventQuery:
         self.order = order
         self.limit = limit
         self.offset = offset
+        for after, before in (("deadline_after", "deadline_before"),
+                              ("event_start_after", "event_start_before")):
+            lower_value, upper_value = getattr(self, after), getattr(self, before)
+            lower = _bound(lower_value, after) if lower_value is not None else None
+            upper = _bound(upper_value, before) if upper_value is not None else None
+            if lower is not None and upper is not None:
+                start = lower.timestamp() if isinstance(lower, datetime) else _day_start(lower)
+                end = upper.timestamp() if isinstance(upper, datetime) else _day_start(
+                    upper + timedelta(days=1)
+                )
+                if start > end or (start == end and type(upper) is date):
+                    raise TimeValidationError([TimeIssue(before, "range_order", upper_value)])
 
     def _where(self) -> tuple[str, dict[str, object]]:
         clauses: list[str] = []
@@ -93,25 +140,32 @@ class EventQuery:
             clauses.append("location LIKE :location")
             params["location"] = f"%{self.location}%"
 
-        # 区间语义：before/after 只约束registration_deadline_at 本身，
-        # 与 only_actionable 是「与」关系 —— 可筛「interested 且 7 天内截止」
-        deadline_column = "registration_deadline_at IS NOT NULL AND registration_deadline_at"
-
-        if self.deadline_before:
-            clauses.append(f"{deadline_column} <= :deadline_before")
-            params["deadline_before"] = self.deadline_before
-
-        if self.deadline_after:
-            clauses.append(f"{deadline_column} >= :deadline_after")
-            params["deadline_after"] = self.deadline_after
-
-        if self.event_start_after:
-            clauses.append("event_start_at IS NOT NULL AND event_start_at >= :event_start_after")
-            params["event_start_after"] = self.event_start_after
-
-        if self.event_start_before:
-            clauses.append("event_start_at IS NOT NULL AND event_start_at <= :event_start_before")
-            params["event_start_before"] = self.event_start_before
+        # 精确时刻按实际秒数比较；date 仅按展示日比较，不伪造截止小时。
+        for name, column, before in (
+            ("deadline_before", "registration_deadline_at", True),
+            ("deadline_after", "registration_deadline_at", False),
+            ("event_start_before", "event_start_at", True),
+            ("event_start_after", "event_start_at", False),
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            parsed = _bound(value, name)
+            operator = "<=" if before else ">="
+            if isinstance(parsed, datetime):
+                instant = parsed.timestamp()
+                day = parsed.astimezone(ZoneInfo(settings.timezone)).date().isoformat()
+            else:
+                instant = _day_start(parsed + timedelta(days=1) if before else parsed)
+                day = parsed.isoformat()
+                if before:
+                    operator = "<"
+            clauses.append(
+                f"(event_time_epoch({column}) {operator} :{name}_instant OR "
+                f"event_date({column}) {'<=' if before else '>='} :{name}_day)"
+            )
+            params[f"{name}_instant"] = instant
+            params[f"{name}_day"] = day
 
         if self.has_missing_fields is True:
             clauses.append("missing_fields IS NOT NULL AND missing_fields NOT IN ('', '[]')")
@@ -124,8 +178,10 @@ class EventQuery:
     def _order_by(self) -> str:
         column = SORTABLE_FIELDS.get(self.sort, SORTABLE_FIELDS["deadline"])
         direction = "DESC" if self.order.lower() == "desc" else "ASC"
-        # 有截止日期的始终优先，非目标排序字段时才叠加这个保护逻辑
-        return f"CASE WHEN registration_deadline_at IS NULL THEN 1 ELSE 0 END, {column} {direction}"
+        if self.sort in ("deadline", "event_start"):
+            expression = f"event_time_sort({column})"
+            return f"{expression} IS NULL, {expression} {direction}, created_at DESC, id ASC"
+        return f"event_time_sort(registration_deadline_at) IS NULL, {column} {direction}, id ASC"
 
 
 class EventRepository:
@@ -167,6 +223,7 @@ class EventRepository:
             params["offset"] = query.offset
 
         with connect() as connection:
+            _configure_time_functions(connection)
             rows = connection.execute(sql, params).fetchall()
             return [dict(row) for row in rows]
 
@@ -179,6 +236,7 @@ class EventRepository:
     def count(self, query: EventQuery) -> int:
         where, params = query._where()
         with connect() as connection:
+            _configure_time_functions(connection)
             row = connection.execute(
                 f"SELECT COUNT(*) AS total FROM events {where}", params
             ).fetchone()
