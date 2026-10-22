@@ -1,9 +1,10 @@
+import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # 项目根 = backend/app/core/config.py 上溯三级
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -22,9 +23,10 @@ class Settings(BaseSettings):
     database_path: Path = Field(default=PROJECT_ROOT / "data" / "planbox.db")
     upload_dir: Path = Field(default=PROJECT_ROOT / "data" / "uploads")
 
-    # CORS 白名单。环境变量 CORS_ALLOW_ORIGINS 用逗号分隔。
+    # CORS 白名单。环境变量支持逗号分隔，并兼容已有 JSON 数组。
     # 通配符仅用于本地验证公网连通性，生产必须显式列出域名。
-    cors_allow_origins: list[str] = Field(
+    # 由 validator 统一解析，避免 settings 在 validator 前强制 JSON 解码。
+    cors_allow_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
 
@@ -42,8 +44,10 @@ class Settings(BaseSettings):
     @field_validator("cors_allow_origins", mode="before")
     @classmethod
     def parse_origins(cls, value: object) -> object:
-        """支持 CORS_ALLOW_ORIGINS="https://a.com,https://b.com"。"""
+        """解析逗号字符串或 JSON 数组；保留 Python list、空数组及空字符串旧行为。"""
         if isinstance(value, str):
+            if value.lstrip().startswith("["):
+                return json.loads(value)
             items = [item.strip() for item in value.split(",") if item.strip()]
             return items or ["http://localhost:5173"]
         return value

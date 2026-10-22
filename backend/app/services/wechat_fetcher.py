@@ -1,22 +1,15 @@
-"""
-微信公众号文章抓取服务
-
-支持两种模式:
-1. 直接传入 article url (mp.weixin.qq.com/s/...)
-2. 传入 biz + fid + mid + idx 参数 (旧版链接格式)
-
-原理：通过将文章URL转换为直接在浏览器中打开的格式，
-借助 wechat-article-cookie 库获取完整正文。
-"""
+"""通过受限的 HTTPS 请求读取微信文章；平台拒绝访问时由调用方提供正文补全。"""
 
 from __future__ import annotations
 
 import re
 from typing import TypedDict
+from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 
 import requests
 
-# from wechat_article_fetcher import fetch_wechat_article_html
+MAX_REDIRECTS = 5
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 class WechatArticle(TypedDict):
@@ -29,31 +22,40 @@ class WechatArticle(TypedDict):
 
 class WechatFetcherError(Exception):
     """抓取失败的异常"""
-    pass
 
 
 def is_wechat_url(url: str) -> bool:
-    """判断是否是微信文章链接"""
-    return "mp.weixin.qq.com" in url
+    """校验 HTTPS 微信文章短/长链接，不发请求，不解码整个 URL。
 
-
-def _guess_is_wechat_url(url: str) -> bool:
-    """通过 URL 模式判断是否可能是微信文章"""
-    patterns = [
-        r"mp\.weixin\.qq\.com/s/",
-        r"mp\.weixin\.qq\.com/s[A-Z]",
-    ]
-    return any(re.match(p, url) for p in patterns)
+    仅接受官方 host、默认/443 端口及无用户信息的 URL；短链允许 URL-safe
+    文章 ID，长链要求 __biz、mid、idx。查询值保留原编码以免改变文章参数。
+    返回 False 表示格式不受支持，不代表文章是否真实存在或可访问。
+    """
+    if not url or re.search(r"[\s\x00-\x1f\x7f\\]", url):
+        return False
+    if re.search(r"%(?![0-9a-fA-F]{2})", url):
+        return False
+    try:
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not re.fullmatch(
+            r"mp\.weixin\.qq\.com(?::443)?", parts.netloc, re.IGNORECASE
+        ):
+            return False
+        if re.fullmatch(r"/s/[A-Za-z0-9_-]+", unquote(parts.path)):
+            return True
+        if parts.path == "/s":
+            query = parse_qs(parts.query, keep_blank_values=True)
+            return all(
+                len(query.get(key, [])) == 1 and query[key][0].strip()
+                for key in ("__biz", "mid", "idx")
+            )
+    except ValueError:
+        return False
+    return False
 
 
 class WechatArticleFetcher:
-    """
-    微信公众号文章抓取器
-
-    使用浏览器自动化方式获取文章内容，支持:
-    - mp.weixin.qq.com/s/ 格式链接
-    - 长链接 (含 biz, fid, mid, idx 参数)
-    """
+    """使用 requests 抓取文章；最多跟随 5 跳同域文章链接，HTML 上限 2 MiB。"""
 
     def __init__(self, timeout: int | None = None):
         from backend.app.core.config import settings
@@ -61,93 +63,68 @@ class WechatArticleFetcher:
         self.timeout = timeout or settings.wechat_fetch_timeout
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         })
 
     def fetch(self, url: str) -> WechatArticle:
+        """抓取并返回文章，source_url 保留输入链接，网络读取在当前线程执行。
+
+        每跳请求使用 timeout 秒的连接/读取超时，不自动重试；这不是总耗时上限。
+        非法链接、不可用响应或缺失正文抛 WechatFetcherError，错误不携带原始 URL。
         """
-        抓取微信文章
-
-        Args:
-            url: 微信文章链接
-
-        Returns:
-            WechatArticle: 包含 title, author, content, published_at, source_url
-
-        Raises:
-            WechatFetcherError: 抓取失败时抛出
-        """
-        if not _guess_is_wechat_url(url):
+        if not is_wechat_url(url):
             raise WechatFetcherError("不是有效的微信文章链接")
 
         try:
-            # 方法1: 尝试直接请求 (某些文章可能直接可访问)
             article = self._try_direct_fetch(url)
             if article and article["content"]:
                 return article
-        except Exception:
-            pass
+        except (requests.RequestException, ValueError, LookupError) as exc:
+            raise WechatFetcherError("文章请求或响应不可用，请复制并粘贴正文补全。") from exc
 
-        # 方法2: 使用官方的 biz URL 转换格式尝试
-        try:
-            article = self._fetch_via_browser_format(url)
-            if article and article["content"]:
-                return article
-        except Exception:
-            pass
-
-        raise WechatFetcherError(f"无法获取文章内容，请检查链接是否有效: {url}")
+        raise WechatFetcherError("无法获取文章正文，请复制并粘贴正文补全。")
 
     def _try_direct_fetch(self, url: str) -> WechatArticle | None:
-        """尝试直接请求文章页面"""
-        try:
-            response = self.session.get(url, timeout=self.timeout)
-            response.raise_for_status()
-            return self._parse_html(response.text, url)
-        except requests.RequestException:
-            return None
-
-    def _fetch_via_browser_format(self, url: str) -> WechatArticle | None:
-        """
-        通过浏览器格式获取文章
-        将 URL 转换为可以在浏览器中直接打开的格式
-        """
-        # 提取 biz 和其他参数
-        biz = self._extract_param(url, "biz")
-        fi = self._extract_param(url, "fi")
-        mid = self._extract_param(url, "mid")
-        idx = self._extract_param(url, "idx")
-
-        if biz:
-            # 构建浏览器格式的 URL
-            browser_url = f"https://mp.weixin.qq.com/mp/profile_ext?action=home&__biz={biz}&scene=124&devicetype=android-23&version=2800003b&lang=zh_CN&nettype=WIFI&ascene=7&session_devicetype=android-23&session_version=2800003b&font=nomal&license=&from=singlemessage&is_from_me=true"
-            if fi:
-                browser_url += f"&fi={fi}"
-            if mid:
-                browser_url += f"&mid={mid}"
-            if idx:
-                browser_url += f"&idx={idx}"
-
-            response = self.session.get(browser_url, timeout=self.timeout)
-            if response.status_code == 200:
-                article = self._parse_html(response.text, url)
-                if article:
-                    return article
-
-        return None
-
-    def _extract_param(self, url: str, param: str) -> str | None:
-        """从 URL 中提取参数"""
-        patterns = [
-            rf"{param}=([^&]+)",
-            rf"[?&]{param}=([^&]+)",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(1)
+        """手动跟随已校验的文章重定向，流式限制解压后字节数及响应类型。"""
+        current_url = url
+        for hop in range(MAX_REDIRECTS + 1):
+            # 禁止 requests 自动跟随，确保下一跳在连接前也使用同一校验。
+            with self.session.get(
+                current_url, timeout=self.timeout, allow_redirects=False, stream=True
+            ) as response:
+                if response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("Location", "")
+                    # urljoin 会移除部分控制字符，须先校验原始 Location。
+                    if not location or re.search(r"[\s\x00-\x1f\x7f\\]", location):
+                        raise WechatFetcherError("文章跳转不可用，请复制并粘贴正文补全。")
+                    target = urljoin(current_url, location)
+                    if not is_wechat_url(target) or hop == MAX_REDIRECTS:
+                        raise WechatFetcherError("文章跳转不可用，请复制并粘贴正文补全。")
+                    current_url = target
+                    continue
+                response.raise_for_status()
+                content_type = response.headers.get("Content-Type", "")
+                if content_type.split(";", 1)[0].strip().lower() not in (
+                    "text/html", "application/xhtml+xml"
+                ):
+                    raise WechatFetcherError("文章响应不是 HTML，请复制并粘贴正文补全。")
+                declared_size = response.headers.get("Content-Length", "")
+                if declared_size.isdigit() and int(declared_size) > MAX_RESPONSE_BYTES:
+                    raise WechatFetcherError("文章响应超过 2 MiB，请复制并粘贴正文补全。")
+                body = bytearray()
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
+                        raise WechatFetcherError("文章响应超过 2 MiB，请复制并粘贴正文补全。")
+                    body.extend(chunk)
+                # 微信正文为 UTF-8；显式 charset 存在时沿用服务端声明。
+                encoding = response.encoding if "charset=" in content_type.lower() else "utf-8"
+                return self._parse_html(body.decode(encoding or "utf-8", errors="replace"), url)
         return None
 
     def _parse_html(self, html: str, source_url: str) -> WechatArticle | None:
