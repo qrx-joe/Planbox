@@ -9,7 +9,15 @@ from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 import requests
 
 MAX_REDIRECTS = 5
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+
+# 传输层上限：按 Content-Length 预检，用于在读正文前快速拒绝超大响应。
+MAX_WIRE_BYTES = 4 * 1024 * 1024
+
+# 解压后上限：微信文章页 gzip 传输约 0.8 MiB，但解压后普遍 2.5~3.5 MiB，
+# 体积几乎全部来自内联脚本与样式，正文本身只有几十 KB。
+# 实测 11 个真实样本解压后 2.46~3.52 MiB，因此上限取 8 MiB 留出余量，
+# 同时仍然给高压缩比响应（gzip 炸弹）设了硬边界。
+MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024
 
 
 class WechatArticle(TypedDict):
@@ -55,7 +63,11 @@ def is_wechat_url(url: str) -> bool:
 
 
 class WechatArticleFetcher:
-    """使用 requests 抓取文章；最多跟随 5 跳同域文章链接，HTML 上限 2 MiB。"""
+    """使用 requests 抓取文章；最多跟随 5 跳同域文章链接。
+
+    传输体积按 Content-Length 预检上限，解压后体积另有独立上限——
+    两者口径不同：微信文章页 gzip 传输很小但解压后有数 MiB。
+    """
 
     def __init__(self, timeout: int | None = None):
         from backend.app.core.config import settings
@@ -115,12 +127,14 @@ class WechatArticleFetcher:
                 ):
                     raise WechatFetcherError("文章响应不是 HTML，请复制并粘贴正文补全。")
                 declared_size = response.headers.get("Content-Length", "")
-                if declared_size.isdigit() and int(declared_size) > MAX_RESPONSE_BYTES:
-                    raise WechatFetcherError("文章响应超过 2 MiB，请复制并粘贴正文补全。")
+                if declared_size.isdigit() and int(declared_size) > MAX_WIRE_BYTES:
+                    raise WechatFetcherError("文章响应过大，请复制并粘贴正文补全。")
                 body = bytearray()
                 for chunk in response.iter_content(chunk_size=64 * 1024):
-                    if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
-                        raise WechatFetcherError("文章响应超过 2 MiB，请复制并粘贴正文补全。")
+                    # iter_content 给出的是解压后字节，所以这里限制的是解压后体积。
+                    # 真实微信文章解压后 2.5~3.5 MiB，不能用传输量口径卡它。
+                    if len(body) + len(chunk) > MAX_DECOMPRESSED_BYTES:
+                        raise WechatFetcherError("文章响应过大，请复制并粘贴正文补全。")
                     body.extend(chunk)
                 # 微信正文为 UTF-8；显式 charset 存在时沿用服务端声明。
                 encoding = response.encoding if "charset=" in content_type.lower() else "utf-8"
@@ -140,9 +154,12 @@ class WechatArticleFetcher:
         if title_match:
             title = self._unescape_json_string(title_match.group(1))
         else:
-            # 备用：从 <title> 标签提取
-            title_match = re.search(r"<title>([^<]+)</title>", html)
-            title = title_match.group(1) if title_match else "未命名文章"
+            # 真实微信页面的 <title> 标签是空的，标题放在 og:title meta 里，
+            # 所以先认 og:title，再退回 <title> 标签。
+            title = self._extract_og_title(html) or ""
+            if not title:
+                title_match = re.search(r"<title>([^<]+)</title>", html)
+                title = title_match.group(1) if title_match else "未命名文章"
 
         author = author_match.group(1) if author_match else None
         if author:
@@ -169,6 +186,28 @@ class WechatArticleFetcher:
             published_at=published_at,
             source_url=source_url,
         )
+
+    def _extract_og_title(self, html: str) -> str | None:
+        """从 og:title meta 取标题。
+
+        真实微信文章页的 <title> 为空，标题只出现在 og:title 里；
+        缺少它会让条目标题退化成「未命名文章」，用户在列表里认不出条目。
+        """
+        match = re.search(
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+            html,
+            re.IGNORECASE,
+        )
+        if not match:
+            # 属性顺序不固定：content 在前时也要能取到。
+            match = re.search(
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
+                html,
+                re.IGNORECASE,
+            )
+        if not match:
+            return None
+        return self._html_unescape(match.group(1)).strip() or None
 
     def _extract_content_from_html(self, html: str) -> str:
         """从 HTML 中提取正文内容"""

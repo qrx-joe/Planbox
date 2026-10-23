@@ -1,5 +1,6 @@
 """T-001 定向回归：只收集本文件，禁用外网，SQLite 使用独立临时目录。"""
 
+import gzip
 import json
 import os
 import subprocess
@@ -18,6 +19,8 @@ from pydantic import ValidationError
 from backend.app.core.config import PROJECT_ROOT, Settings, settings
 from backend.app.services import wechat_fetcher
 from backend.app.services.wechat_fetcher import (
+    MAX_DECOMPRESSED_BYTES,
+    MAX_WIRE_BYTES,
     WechatArticleFetcher,
     WechatFetcherError,
     is_wechat_url,
@@ -176,8 +179,8 @@ def test_network_failure_stops_without_retry_or_profile_fallback(monkeypatch, fa
         response(403),
         response(text="<title>访问受限</title>"),
         response(headers={"Content-Type": "application/json"}),
-        response(headers={"Content-Length": str(2 * 1024 * 1024 + 1)}),
-        response(text=HTML + "x" * (2 * 1024 * 1024)),
+        response(headers={"Content-Length": str(MAX_WIRE_BYTES + 1)}),
+        response(text=HTML + "x" * (MAX_DECOMPRESSED_BYTES + 1)),
     ],
 )
 def test_http_body_boundaries_fail_clearly(monkeypatch, result):
@@ -188,7 +191,7 @@ def test_http_body_boundaries_fail_clearly(monkeypatch, result):
 
 
 def test_oversized_header_stops_before_body_and_closes_response(monkeypatch):
-    result = response(headers={"Content-Length": str(2 * 1024 * 1024 + 1)})
+    result = response(headers={"Content-Length": str(MAX_WIRE_BYTES + 1)})
     monkeypatch.setattr(result, "iter_content", Mock(side_effect=AssertionError("不应读取正文")))
     close = Mock(wraps=result.close)
     monkeypatch.setattr(result, "close", close)
@@ -389,3 +392,110 @@ with TestClient(app) as client:
     )
     assert result.returncode == 0, "隔离启动/CORS 预检失败；未输出可能含本地配置的子进程日志"
     assert json.loads(result.stdout) == {"startup": "ok", "preflights": 3}
+
+
+# --- T-008 真实微信文章体积：gzip 传输小、解压后大，不能按传输量放行也不能按解压量误杀 ---
+
+
+def gzip_response(html: str):
+    """构造与真实微信文章一致的响应：传输层是 gzip 字节，解压后正文很大。
+
+    真实样本实测：Content-Length 约 0.78 MiB，解压后 2.46~3.52 MiB，
+    正文（js_content）只有几十 KB，体积几乎全部来自内联脚本与样式。
+
+    requests 的 iter_content 在 decode_content=True 时给出的是解压后字节，
+    所以 _content 放解压结果、Content-Length 放 gzip 后的长度，
+    才能复现「声明很小、实际很大」这一真实特征。
+    """
+    result = requests.Response()
+    result.status_code = 200
+    compressed = gzip.compress(html.encode("utf-8"))
+    result.headers.update({
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Encoding": "gzip",
+        "Content-Length": str(len(compressed)),
+    })
+    result._content = html.encode("utf-8")
+    result._content_consumed = True
+    result.encoding = "utf-8"
+    return result
+
+
+def realistic_article_html(padding_bytes: int) -> str:
+    """正文在文档前部，后面跟大量内联脚本，模拟真实页面的体积构成。"""
+    return (
+        f'<title>真实体量文章</title><div id="js_content"><p>{BODY}</p></div>'
+        + "<script>" + ("x" * padding_bytes) + "</script>"
+    )
+
+
+def test_realistic_article_body_above_two_mib_is_not_rejected(monkeypatch):
+    """解压后超过 2 MiB 的真实文章必须能抓出正文。
+
+    旧实现把 2 MiB 当作解压后上限，11 个真实样本中 9 个会被误判为
+    「文章响应超过 2 MiB」，正文根本没开始解析。
+    """
+    html = realistic_article_html(3 * 1024 * 1024)
+    fetcher = WechatArticleFetcher(timeout=3)
+    monkeypatch.setattr(fetcher.session, "get", Mock(return_value=gzip_response(html)))
+    article = fetcher.fetch(SHORT_URL)
+    assert article["content"] == BODY
+    assert article["title"] == "真实体量文章"
+
+
+def test_declared_content_length_still_rejects_oversized_response(monkeypatch):
+    """声明长度超限仍要在读正文前拒绝，不因放宽解压上限而失效。"""
+    result = response(headers={"Content-Length": str(MAX_WIRE_BYTES + 1)})
+    monkeypatch.setattr(result, "iter_content", Mock(side_effect=AssertionError("不应读取正文")))
+    fetcher = WechatArticleFetcher(timeout=3)
+    monkeypatch.setattr(fetcher.session, "get", Mock(return_value=result))
+    with pytest.raises(WechatFetcherError):
+        fetcher.fetch(SHORT_URL)
+    result.iter_content.assert_not_called()
+
+
+def test_decompressed_body_still_has_a_hard_ceiling(monkeypatch):
+    """解压后体积仍有硬上限，不能因为放宽就变成无限制读入。"""
+    html = realistic_article_html(MAX_DECOMPRESSED_BYTES + 1024 * 1024)
+    fetcher = WechatArticleFetcher(timeout=3)
+    monkeypatch.setattr(fetcher.session, "get", Mock(return_value=gzip_response(html)))
+    with pytest.raises(WechatFetcherError):
+        fetcher.fetch(SHORT_URL)
+
+
+def test_compressed_expansion_bomb_is_still_bounded(monkeypatch):
+    """高压缩比响应不得靠 gzip 炸弹撑大内存占用。"""
+    html = "<div id=\"js_content\">" + ("A" * (MAX_DECOMPRESSED_BYTES * 4)) + "</div>"
+    result = gzip_response(html)
+    fetcher = WechatArticleFetcher(timeout=3)
+    monkeypatch.setattr(fetcher.session, "get", Mock(return_value=result))
+    with pytest.raises(WechatFetcherError):
+        fetcher.fetch(SHORT_URL)
+
+
+def test_title_falls_back_to_og_title_when_title_tag_is_empty(monkeypatch):
+    """真实微信页面的 <title> 为空，标题只在 og:title 里。
+
+    取不到标题会让条目显示成「未命名文章」，用户在 Inbox 里认不出条目。
+    """
+    html = (
+        '<head><title></title>'
+        '<meta property="og:title" content="黑客松报名 | 某某活动">'
+        f'</head><div id="js_content"><p>{BODY}</p></div>'
+    )
+    fetcher = WechatArticleFetcher(timeout=3)
+    monkeypatch.setattr(fetcher.session, "get", Mock(return_value=response(text=html)))
+    article = fetcher.fetch(SHORT_URL)
+    assert article["title"] == "黑客松报名 | 某某活动"
+    assert article["content"] == BODY
+
+
+def test_og_title_is_read_when_content_attribute_comes_first(monkeypatch):
+    """meta 属性顺序不固定，content 在前也要能取到标题。"""
+    html = (
+        '<meta content="倒序属性标题" property="og:title">'
+        f'<div id="js_content"><p>{BODY}</p></div>'
+    )
+    fetcher = WechatArticleFetcher(timeout=3)
+    monkeypatch.setattr(fetcher.session, "get", Mock(return_value=response(text=html)))
+    assert fetcher.fetch(SHORT_URL)["title"] == "倒序属性标题"

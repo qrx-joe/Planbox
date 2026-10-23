@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { deadlineStatus, formatRelativeDate, timeReviewMessage, type TimeIssue } from "./time";
+import { isWechatArticleUrl } from "./link-rules";
 import { ActivityDetails } from "./ActivityDetails";
 import { ReviewCard, type ReviewQueueItem } from "./ReviewCard";
 import { requestDetail } from "./activity-details";
@@ -277,8 +278,9 @@ export function App() {
     setIsSaving(true);
     setMessage(null);
     try {
-      // 微信文章链接走专门的抓取接口
-      const isWechatUrl = sourceUrl.includes("mp.weixin.qq.com");
+      // 微信文章链接走专门的抓取接口。判定规则与后端 is_wechat_url 一致，
+      // 不能用子串包含——那样会把 evil.com/?x=mp.weixin.qq.com 误判成微信链接。
+      const isWechatUrl = isWechatArticleUrl(sourceUrl);
       const endpoint = isWechatUrl
         ? `${API_BASE_URL}/api/source-items/fetch`
         : `${API_BASE_URL}/api/source-items`;
