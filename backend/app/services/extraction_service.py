@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
-from typing import TYPE_CHECKING
 
+from backend.app.core.evidence import FACT_FIELDS, locate_evidence
 from backend.app.core.ids import new_id
 from backend.app.core.temporal import TimeValueError, parse_time
 from backend.app.core.time import now_iso
@@ -21,9 +21,6 @@ from backend.app.schemas.extraction import (
     ReviewQueueItem,
 )
 
-if TYPE_CHECKING:
-    from backend.app.core.config import Settings
-
 
 class ExtractionService:
     def __init__(
@@ -35,6 +32,33 @@ class ExtractionService:
         self.extraction_repository = extraction_repository or ExtractionRepository()
         self.source_repository = source_repository or SourceItemRepository()
         self.llm_provider = llm_provider
+
+    def prepare_review_draft(
+        self, data: dict[str, object], source: dict[str, object],
+    ) -> ExtractedEventDraft:
+        """更正后重新标记缺失/时间问题并定位证据；保留自定义未知项，不补猜日期。
+
+        原始证据由调用方保留在证据表。重建只产生当前候选，无数据库/模型副作用。
+        """
+        draft = ExtractedEventDraft.model_validate(data)
+        editable = {*FACT_FIELDS, "schedule"}
+        custom = [name for name in draft.missing_fields
+                  if name not in editable and not name.startswith("schedule.")]
+        draft.missing_fields = list(dict.fromkeys([*custom, *self._compute_missing_fields(draft)]))
+        draft = ExtractedEventDraft.model_validate(draft.model_dump())
+        draft.evidences = self._generate_evidences(draft, str(source.get("raw_text") or ""))
+        draft.time_issues = [replace(issue, reference_at=None, reference_kind=None)
+                             for issue in draft.time_issues]
+        for kind in ("published_at", "captured_at"):
+            reference = source.get(kind)
+            try:
+                parse_time(reference)
+            except TimeValueError:
+                continue
+            draft.time_issues = [replace(issue, reference_at=reference, reference_kind=kind)
+                                 for issue in draft.time_issues]
+            break
+        return draft
 
     def _get_llm_provider(self) -> BaseLLMProvider:
         if self.llm_provider is not None:
@@ -153,38 +177,37 @@ class ExtractionService:
             "event_type": draft.event_type,
             "organizer": draft.organizer,
             "registration_url": draft.registration_url,
+            "registration_start_at": draft.registration_start_at,
             "registration_deadline_at": draft.registration_deadline_at,
             "event_start_at": draft.event_start_at,
+            "event_end_at": draft.event_end_at,
             "location": draft.location,
+            "is_online": draft.is_online,
             "fee": draft.fee,
+            "prize": draft.prize,
+            "team_required": draft.team_required,
+            "audience": draft.audience,
         }
+        for index, node in enumerate(draft.schedule):
+            for key in ("name", "start_at", "end_at"):
+                field_mapping[f"schedule.{index}.{key}"] = node.get(key)
 
         for field_name, field_value in field_mapping.items():
-            if field_value:
-                evidence_text = self._find_evidence_text(field_value, source_text)
+            if field_value is not None and field_value != "":
+                located = locate_evidence(str(field_value), source_text)
                 evidences.append(
                     EvidenceDraft(
                         field=field_name,
                         value=str(field_value),
-                        evidence=evidence_text,
-                        confidence=0.8,
+                        evidence=located.quote if located else None,
+                        confidence=None,
+                        verification_status="located" if located else "unverified",
+                        start_offset=located.start_offset if located else None,
+                        end_offset=located.end_offset if located else None,
                     )
                 )
 
         return evidences
-
-    def _find_evidence_text(self, value: str, source_text: str) -> str:
-        max_len = 200
-        if len(source_text) <= max_len:
-            return source_text
-
-        idx = source_text.find(str(value))
-        if idx == -1:
-            return source_text[:max_len]
-
-        start = max(0, idx - 50)
-        end = min(len(source_text), idx + len(str(value)) + 50)
-        return source_text[start:end]
 
     def _compute_missing_fields(self, draft: ExtractedEventDraft) -> list[str]:
         required_fields = [
@@ -206,9 +229,6 @@ class ExtractionService:
         row = self.extraction_repository.get(extraction_result_id)
         return self._to_read(row) if row else None
 
-    def reject(self, extraction_result_id: str) -> None:
-        self.extraction_repository.update_status(extraction_result_id, "rejected", now_iso())
-
     def mark_confirmed(self, extraction_result_id: str) -> None:
         self.extraction_repository.update_status(extraction_result_id, "confirmed", now_iso())
 
@@ -217,29 +237,9 @@ class ExtractionService:
         url = str(source.get("source_url") or "") or None
         title = str(source.get("title") or "").strip() or self._guess_title(text, url)
         event_type = self._guess_event_type(text)
-        deadline, deadline_evidence = self._guess_deadline(text)
+        deadline, _ = self._guess_deadline(text)
         location = self._guess_location(text)
         is_online = self._guess_is_online(text)
-        evidences: list[EvidenceDraft] = []
-
-        if deadline:
-            evidences.append(
-                EvidenceDraft(
-                    field="registration_deadline_at",
-                    value=deadline,
-                    evidence=deadline_evidence,
-                    confidence=0.72,
-                )
-            )
-        if url:
-            evidences.append(
-                EvidenceDraft(
-                    field="registration_url",
-                    value=url,
-                    evidence="来源链接被暂用为报名/原文链接，需人工确认。",
-                    confidence=0.35,
-                )
-            )
 
         missing_fields = [
             field
@@ -253,7 +253,7 @@ class ExtractionService:
         ]
         confidence = 0.45 + (0.15 if deadline else 0) + (0.1 if event_type else 0)
 
-        return ExtractedEventDraft(
+        draft = ExtractedEventDraft(
             title=title,
             event_type=event_type,
             registration_url=url,
@@ -262,8 +262,9 @@ class ExtractionService:
             is_online=is_online,
             missing_fields=missing_fields,
             confidence=min(confidence, 0.85),
-            evidences=evidences,
         )
+        draft.evidences = self._generate_evidences(draft, text)
+        return draft
 
     def _guess_title(self, text: str, url: str | None) -> str:
         for line in text.splitlines():
@@ -338,6 +339,7 @@ class ExtractionService:
             confidence=row.get("confidence"),  # type: ignore[arg-type]
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
+            revision=int(row.get("revision", 0)),
         )
 
     def _to_review_item(self, row: dict[str, object]) -> ReviewQueueItem:

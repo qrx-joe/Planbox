@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from backend.app.core.evidence import FACT_FIELDS
 from backend.app.core.ids import new_id
-from backend.app.core.temporal import TIME_FIELDS, validate_event_times
+from backend.app.core.temporal import validate_event_times
 from backend.app.core.time import now_iso
+from backend.app.repositories.draft_repository import DraftRepository
 from backend.app.repositories.event_repository import EventQuery, EventRepository
 from backend.app.repositories.extraction_repository import (
     ExtractionRepository,
@@ -19,7 +21,9 @@ from backend.app.schemas.event import (
     EventStatusUpdate,
     EventUpdate,
 )
-from backend.app.schemas.extraction import EvidenceDraft, ExtractedEventDraft
+from backend.app.schemas.extraction import DraftEdit, EvidenceDraft, ExtractedEventDraft
+from backend.app.services.correction_service import CorrectionConflict, CorrectionService
+from backend.app.services.draft_service import DraftService
 
 
 class EventStatusError(ValueError):
@@ -40,13 +44,24 @@ class EventService:
     def confirm_extraction(
         self, extraction_result_id: str, payload: EventConfirm
     ) -> EventRead:
-        extraction = self.extraction_repository.get(extraction_result_id)
-        if extraction is None:
-            raise ValueError("Extraction result not found")
+        """锁定候选版本后确认；活动、来源关联、证据与草稿状态在同一事务提交。"""
+        with DraftRepository().edit(extraction_result_id) as (connection, extraction):
+            return self._confirm_locked(extraction_result_id, payload, connection, extraction)
+
+    def _confirm_locked(self, extraction_result_id, payload, connection, extraction) -> EventRead:
         if extraction["status"] != "pending_review":
             raise ValueError("Extraction result is not pending review")
-
-        draft = payload.extracted or ExtractedEventDraft.model_validate(
+        if (payload.expected_revision is not None
+                and payload.expected_revision != extraction["revision"]):
+            raise CorrectionConflict("草稿已被更正，请重新读取后再确认")
+        if payload.extracted is not None:
+            # 兼容旧客户端的确认时修改，但元数据/证据不能由客户端自证。
+            changes = {key: value for key, value in payload.extracted.model_dump().items()
+                       if key in {*FACT_FIELDS, "schedule"}}
+            extraction = DraftService().apply_locked(connection, extraction, DraftEdit(
+                changes=changes, expected_revision=extraction["revision"],
+            ))
+        draft = ExtractedEventDraft.model_validate(
             loads_json(str(extraction["extracted_json"]), {})
         )
         validate_event_times(draft.model_dump())
@@ -79,19 +94,23 @@ class EventService:
                 "updated_at": timestamp,
             },
             source_item_id=str(extraction["source_item_id"]),
+            connection=connection,
         )
 
-        # 关键修复：证据在抽取阶段写入时 event_id 为 NULL，
-        # 确认入库后必须回填关联，否则证据永远查不到。
-        # 用户在确认时补充/修正的 evidences 也要落库，否则修正后的判断同样不可溯源。
-        self.extraction_repository.attach_evidences_to_event(extraction_result_id, event_id)
+        # 同一事务挂接原候选与更正后的证据；不信任确认请求自报的证据元数据。
+        self.extraction_repository.attach_evidences_to_event(
+            extraction_result_id, event_id, connection,
+        )
         self._persist_evidences(
             extraction_result_id=extraction_result_id,
             source_item_id=str(extraction["source_item_id"]),
             event_id=event_id,
             evidences=draft.evidences,
+            connection=connection,
         )
-        self.extraction_repository.update_status(extraction_result_id, "confirmed", timestamp)
+        self.extraction_repository.update_status(
+            extraction_result_id, "confirmed", timestamp, connection,
+        )
 
         return event_row_to_read(row)
 
@@ -102,12 +121,13 @@ class EventService:
         source_item_id: str,
         event_id: str,
         evidences: list[EvidenceDraft],
+        connection=None,
     ) -> None:
         """把草稿携带的 evidences 落库并关联到活动，按字段去重。"""
         if not evidences:
             return
 
-        existing = self.extraction_repository.list_field_names(extraction_result_id)
+        existing = self.extraction_repository.list_field_names(extraction_result_id, connection)
         rows: list[dict[str, object]] = []
         timestamp = now_iso()
 
@@ -129,7 +149,7 @@ class EventService:
                 }
             )
 
-        self.extraction_repository.create_evidences(rows)
+        self.extraction_repository.create_evidences(rows, connection)
 
     # ---------- 读取 ----------
 
@@ -191,23 +211,10 @@ class EventService:
     # ---------- 字段修正 ----------
 
     def update(self, event_id: str, payload: EventUpdate) -> EventRead:
-        values = payload.to_column_values()
-        if set(values).intersection((*TIME_FIELDS, "schedule_json")):
-            row = self.event_repository.get_or_raise(event_id)
-            candidate = {**row, **values}
-            candidate["schedule"] = loads_json(candidate.get("schedule_json"), [])
-            # 时间校验必须早于状态写入，拒绝时不留下部分更新。
-            validate_event_times(candidate)
-
-        if "status" in values and values["status"] is not None:
-            status_value = str(values.pop("status"))
-            self.update_status(event_id, EventStatusUpdate(status=status_value), force=True)
-
-        if not values:
-            return self.get_or_raise(event_id)
-
-        values["updated_at"] = now_iso()
-        return event_row_to_read(self.event_repository.update(event_id, values))
+        """人工编辑与更正历史同事务写入；状态迁移的统一规则由 T-004 继续处理。"""
+        if "status" in payload.model_fields_set and payload.status not in USER_SETTABLE_STATUSES:
+            raise EventStatusError("不允许手动设置该状态")
+        return event_row_to_read(CorrectionService().update(event_id, payload))
 
     def delete(self, event_id: str) -> None:
         if self.event_repository.get(event_id) is None:

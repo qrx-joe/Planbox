@@ -1,8 +1,10 @@
 
 from fastapi import APIRouter, HTTPException, Query, status
+from pydantic import ValidationError
 
 from backend.app.core.temporal import TimeValidationError
 from backend.app.repositories.event_repository import EventQuery
+from backend.app.schemas.correction import CorrectionList, CorrectionRetraction
 from backend.app.schemas.event import (
     DuplicateCheckResponse,
     EventListResponse,
@@ -13,8 +15,9 @@ from backend.app.schemas.event import (
     EventUpdate,
 )
 from backend.app.schemas.opportunity_score import OpportunityScoreRead
+from backend.app.services.correction_service import CorrectionConflict, CorrectionService
 from backend.app.services.dedup_service import DedupService
-from backend.app.services.event_service import EventService, EventStatusError
+from backend.app.services.event_service import EventService, EventStatusError, event_row_to_read
 from backend.app.services.scoring_service import ScoringService
 
 router = APIRouter()
@@ -111,9 +114,42 @@ def update_event(event_id: str, payload: EventUpdate) -> EventRead:
         return service.update(event_id, payload)
     except KeyError as exc:
         raise _not_found() from exc
+    except CorrectionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except EventStatusError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except TimeValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/{event_id}/corrections", response_model=CorrectionList)
+def list_corrections(
+    event_id: str, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0),
+) -> CorrectionList:
+    """分页读取此活动的人工更正；来源定位不等于人工确认，主体未认证。"""
+    try:
+        return CorrectionService().list(event_id, limit, offset)
+    except KeyError as exc:
+        raise _not_found() from exc
+
+
+@router.post("/{event_id}/corrections/{operation_id}/retract", response_model=EventRead)
+def retract_correction(
+    event_id: str, operation_id: str, payload: CorrectionRetraction,
+) -> EventRead:
+    """整次撤回并保留反向历史；后续修改覆盖时返回 409，重复成功请求不再写入。"""
+    try:
+        restored = CorrectionService().retract(event_id, operation_id, payload.reason)
+        return event_row_to_read(restored)
+    except KeyError as exc:
+        raise _not_found() from exc
+    except CorrectionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail="旧值不满足当前字段契约，无法直接恢复") from exc
+    except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 

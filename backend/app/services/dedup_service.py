@@ -298,6 +298,10 @@ class DedupService:
                 "UPDATE evidences SET event_id = ? WHERE event_id = ?",
                 (target_id, source_id),
             )
+            connection.execute(
+                "UPDATE event_corrections SET event_id = ? WHERE event_id = ?",
+                (target_id, source_id),
+            )
             connection.commit()
             return len(rows)
 

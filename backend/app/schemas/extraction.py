@@ -1,7 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from backend.app.core.evidence import FACT_FIELDS
 from backend.app.core.temporal import TimeIssue, inspect_event_times
 
 ExtractionStatus = Literal["pending_review", "confirmed", "rejected"]
@@ -11,7 +12,10 @@ class EvidenceDraft(BaseModel):
     field: str
     value: str | None = None
     evidence: str | None = None
-    confidence: float = Field(ge=0, le=1)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    verification_status: Literal["located", "unverified"] = "unverified"
+    start_offset: int | None = Field(default=None, ge=0)
+    end_offset: int | None = Field(default=None, ge=0)
 
 
 class ExtractedEventDraft(BaseModel):
@@ -58,6 +62,24 @@ class ExtractionResultRead(BaseModel):
     confidence: float | None = None
     created_at: str
     updated_at: str
+    revision: int = 0
+
+
+class DraftEdit(BaseModel):
+    """只编辑候选事实；不接受客户端自报来源、证据、置信度或生命周期。"""
+
+    model_config = ConfigDict(extra="forbid")
+    changes: dict[str, object] = Field(min_length=1, max_length=16)
+    expected_revision: int = Field(ge=0)
+    expected_values: dict[str, object] | None = None
+    reason: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("changes", "expected_values")
+    @classmethod
+    def allowed_fields(cls, values: dict[str, object] | None) -> dict[str, object] | None:
+        if values is not None and not set(values) <= {*FACT_FIELDS, "schedule"}:
+            raise ValueError("只允许修改草稿事实字段")
+        return values
 
 
 class ReviewQueueItem(BaseModel):

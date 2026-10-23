@@ -47,6 +47,7 @@ ACTIONABLE_STATUSES: frozenset[str] = frozenset({"interested", "applied"})
 class EventConfirm(BaseModel):
     extracted: ExtractedEventDraft | None = None
     status: str = "interested"
+    expected_revision: int | None = Field(default=None, ge=0)
 
 
 class EventStatusUpdate(BaseModel):
@@ -73,6 +74,10 @@ class EventUpdate(BaseModel):
     audience: str | None = None
     status: EventStatus | None = None
     notes: str | None = None
+    correction_reason: str | None = Field(default=None, max_length=1000)
+    source_item_id: str | None = Field(default=None, min_length=1, max_length=200, pattern=r"\S")
+    expected_values: dict[str, object] | None = None
+    expected_revision: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_submitted_times(self) -> "EventUpdate":
@@ -82,7 +87,9 @@ class EventUpdate(BaseModel):
 
     def to_column_values(self) -> dict[str, object]:
         """转换为可直接写入 events 表的列值，只包含显式提供的字段。"""
-        data = self.model_dump(exclude_unset=True)
+        data = self.model_dump(exclude_unset=True, exclude={
+            "correction_reason", "source_item_id", "expected_values", "expected_revision",
+        })
         values: dict[str, object] = {}
         for key, value in data.items():
             if key == "schedule":

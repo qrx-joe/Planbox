@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import nullcontext
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -185,22 +186,30 @@ class EventQuery:
 
 
 class EventRepository:
-    def create(self, values: dict[str, object], source_item_id: str) -> dict[str, object]:
+    def create(
+        self, values: dict[str, object], source_item_id: str,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        """创建活动及来源关联；显式连接由用例提交/回滚，不提前提交或关闭。
+
+        未传连接时保留独立创建并提交的旧行为；返回当前事务可见的活动行。
+        """
         columns = ", ".join(values.keys())
         placeholders = ", ".join(f":{key}" for key in values)
         query = f"INSERT INTO events ({columns}) VALUES ({placeholders})"
 
-        with connect() as connection:
-            connection.execute(query, values)
-            connection.execute(
+        with (nullcontext(connection) if connection is not None else connect()) as active:
+            active.execute(query, values)
+            active.execute(
                 """
                 INSERT INTO event_sources (event_id, source_item_id, created_at)
                 VALUES (?, ?, ?)
                 """,
                 (values["id"], source_item_id, values["created_at"]),
             )
-            connection.commit()
-            row = connection.execute(
+            if connection is None:
+                active.commit()
+            row = active.execute(
                 "SELECT * FROM events WHERE id = ?",
                 (values["id"],),
             ).fetchone()
