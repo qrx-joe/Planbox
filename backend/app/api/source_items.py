@@ -3,11 +3,11 @@ from fastapi import APIRouter, HTTPException, UploadFile, status
 from backend.app.core.time import now_iso
 from backend.app.schemas.extraction import ExtractionResultRead
 from backend.app.schemas.source_item import (
+    SourceFetchResponse,
     SourceItemCreate,
     SourceItemRead,
     SourceItemUploadResponse,
     WechatFetchRequest,
-    WechatFetchResponse,
 )
 from backend.app.services.extraction_service import ExtractionService
 from backend.app.services.source_service import SourceService
@@ -15,6 +15,12 @@ from backend.app.services.wechat_fetcher import (
     WechatFetcherError,
     fetch_wechat_article,
     is_wechat_url,
+)
+from backend.app.services.xiaohongshu_fetcher import (
+    MIN_CONTENT_LENGTH,
+    XiaohongshuFetcherError,
+    is_xiaohongshu_note_url,
+    is_xiaohongshu_short_link,
 )
 
 router = APIRouter()
@@ -27,24 +33,35 @@ def create_source_item(payload: SourceItemCreate) -> SourceItemRead:
     return service.create(payload)
 
 
-@router.post("/fetch", response_model=WechatFetchResponse)
-async def fetch_and_create_wechat_article(payload: WechatFetchRequest) -> WechatFetchResponse:
-    """微信公众号文章抓取 + 自动入库。
+@router.post("/fetch", response_model=SourceFetchResponse)
+async def fetch_and_create_source_article(
+    payload: WechatFetchRequest,
+) -> SourceFetchResponse:
+    """公众号文章与小红书笔记抓取 + 自动入库。
 
-    **注意**：微信对非客户端请求有风控，服务器直连经常抓不到。
+    **注意**：两个平台对服务端直连都不友好。微信有风控，小红书笔记正文
+    不在服务端 HTML 里（真实浏览器实测会返回「IP存在风险」）。
     抓取失败时不报错，而是返回 status=needs_content 的条目，
-    引导用户回文章页复制正文后补全——这是预期行为。
+    引导用户粘贴正文或上传截图——这是预期行为，不是异常。
 
-    文章链接从请求体读取而非查询参数：URL 里出现完整外链
+    链接从请求体读取而非查询参数：URL 里出现完整外链
     会被 CDN 层的 WAF 当作开放重定向/SSRF 特征直接拦截（403）。
     """
     source_url = payload.source_url
-    if not is_wechat_url(source_url):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="不是有效的微信公众号文章链接",
-        )
 
+    if is_wechat_url(source_url):
+        return await _fetch_wechat(source_url)
+    if is_xiaohongshu_note_url(source_url) or is_xiaohongshu_short_link(source_url):
+        return await _fetch_xiaohongshu(source_url)
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="不是有效的微信公众号文章或小红书笔记链接",
+    )
+
+
+async def _fetch_wechat(source_url: str) -> SourceFetchResponse:
+    """抓取微信公众号文章。"""
     fetched: dict | None = None
     fetch_error: str | None = None
     try:
@@ -84,7 +101,7 @@ async def fetch_and_create_wechat_article(payload: WechatFetchRequest) -> Wechat
             # 抽取失败用户仍可手动重试，不该看到创建失败
             extraction_started = False
 
-    return WechatFetchResponse(
+    return SourceFetchResponse(
         source_item=item,
         status="ready" if has_content else "needs_content",
         fetch_succeeded=has_content,
@@ -99,6 +116,86 @@ async def fetch_and_create_wechat_article(payload: WechatFetchRequest) -> Wechat
         ),
         extraction_started=extraction_started,
     )
+
+
+async def _fetch_xiaohongshu(source_url: str) -> SourceFetchResponse:
+    """抓取小红书笔记。
+
+    小红书笔记正文不在服务端 HTML 里——页面只有骨架，真实内容由前端 JS
+    请求带设备签名的接口取得。所以这里多数情况下取不到正文，属预期结果：
+    返回 needs_content，让用户粘贴正文或上传截图。
+
+    仍然值得一试的原因：短链能被展开成带 xsec_token 的完整地址，
+    某些情况下服务端会直接把笔记数据渲染进初始状态。
+    """
+    from backend.app.services.xiaohongshu_fetcher import XiaohongshuNoteFetcher
+
+    fetched = None
+    fetch_error: str | None = None
+    resolved_url: str | None = None
+    try:
+        fetched = await _fetch_xhs_async(XiaohongshuNoteFetcher(), source_url)
+        resolved_url = fetched.get("source_url")
+    except XiaohongshuFetcherError as exc:
+        fetch_error = str(exc)
+
+    has_content = bool(fetched and len(fetched.get("content") or "") >= MIN_CONTENT_LENGTH)
+
+    item = service.create_with_meta(
+        source_type="xhs",
+        source_url=resolved_url or source_url,
+        raw_text=fetched["content"] if has_content else None,
+        title=fetched.get("title") if fetched else None,
+        published_at=fetched.get("published_at") if fetched else None,
+        ingest_state="ready" if has_content else "needs_content",
+        source_meta=(
+            {
+                "entry": "xiaohongshu_fetch",
+                "captured_at": now_iso(),
+                "fetch_error": fetch_error,
+                "fetch_succeeded": has_content,
+                "origin_url": source_url,
+                "resolved_url": resolved_url,
+            }
+            if fetch_error or not has_content
+            else None
+        ),
+    )
+
+    extraction_started = False
+    if has_content:
+        try:
+            await extraction_service.extract(item.id)
+            service.mark_extract_pending(item.id)
+            extraction_started = True
+        except Exception:
+            # 抽取失败用户仍可手动重试，不该看到创建失败
+            extraction_started = False
+
+    return SourceFetchResponse(
+        source_item=item,
+        status="ready" if has_content else "needs_content",
+        fetch_succeeded=has_content,
+        fetch_error=fetch_error,
+        next_action=(
+            "正文已抓取，已生成待确认草稿。"
+            if has_content
+            else (
+                fetch_error
+                or "小红书笔记正文无法直接抓取（平台不在服务端返回正文）。"
+                "请在笔记页复制正文粘贴，或上传笔记截图。"
+            )
+        ),
+        extraction_started=extraction_started,
+        resolved_url=resolved_url,
+    )
+
+
+async def _fetch_xhs_async(fetcher, source_url: str) -> dict:
+    """在线程里跑同步抓取，避免阻塞事件循环。"""
+    import asyncio
+
+    return await asyncio.to_thread(fetcher.fetch, source_url)
 
 
 @router.get("", response_model=list[SourceItemRead])

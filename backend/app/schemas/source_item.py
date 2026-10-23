@@ -58,11 +58,12 @@ class WechatFetchRequest(BaseModel):
     source_url: str = Field(min_length=1, max_length=2000)
 
 
-class WechatFetchResponse(BaseModel):
+class SourceFetchResponse(BaseModel):
     """抓取结果。
 
-    微信对服务端直连有风控，抓取失败是常态而非异常，
-    因此不抛错，而是用 status 告知前端下一步该做什么。
+    微信对服务端直连有风控，小红书笔记正文也不在服务端 HTML 里，
+    抓取失败是常态而非异常。因此不抛错，而是用 status 告知前端下一步
+    该做什么——粘贴正文或上传截图。
     """
 
     source_item: SourceItemRead
@@ -71,4 +72,11 @@ class WechatFetchResponse(BaseModel):
     fetch_error: str | None = None
     next_action: str
     extraction_started: bool = False
+    # 解析出的真实链接。短链会被展开成带 xsec_token 的完整地址，
+    # 前端展示它便于用户确认抓的是哪一篇。
+    resolved_url: str | None = None
+
+
+# 保留旧名，现有调用方与测试按此引用。
+WechatFetchResponse = SourceFetchResponse
 

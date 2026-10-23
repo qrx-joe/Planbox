@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { deadlineStatus, formatRelativeDate, timeReviewMessage, type TimeIssue } from "./time";
-import { isWechatArticleUrl } from "./link-rules";
+import { isFetchableLink } from "./link-rules";
 import { ActivityDetails } from "./ActivityDetails";
 import { ReviewCard, type ReviewQueueItem } from "./ReviewCard";
 import { requestDetail } from "./activity-details";
@@ -278,15 +278,15 @@ export function App() {
     setIsSaving(true);
     setMessage(null);
     try {
-      // 微信文章链接走专门的抓取接口。判定规则与后端 is_wechat_url 一致，
+      // 微信文章与小红书笔记走专门的抓取接口。判定规则与后端一致，
       // 不能用子串包含——那样会把 evil.com/?x=mp.weixin.qq.com 误判成微信链接。
-      const isWechatUrl = isWechatArticleUrl(sourceUrl);
-      const endpoint = isWechatUrl
+      const shouldFetch = isFetchableLink(sourceUrl);
+      const endpoint = shouldFetch
         ? `${API_BASE_URL}/api/source-items/fetch`
         : `${API_BASE_URL}/api/source-items`;
       // 抓取接口的链接走请求体：URL 里带完整外链会被 CDN 层 WAF 拦成403
       const body = JSON.stringify(
-        isWechatUrl
+        shouldFetch
           ? { source_url: sourceUrl }
           : {
               source_type: sourceUrl ? "web" : "text",
@@ -305,8 +305,8 @@ export function App() {
         throw new Error(err.detail || "保存失败");
       }
 
-      if (isWechatUrl) {
-        // 抓取失败是常态（微信风控），引导用户粘贴正文而非报错
+      if (shouldFetch) {
+        // 抓取失败是常态（微信风控、小红书正文不在服务端），引导用户粘贴正文而非报错
         const data = await response.json();
         if (data.status === "needs_content") {
           setPendingContent({

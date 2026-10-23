@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # 微信抓取超时。云端 IP 常被风控，快速失败并降级比长时间挂起更好。
     wechat_fetch_timeout: int = 10
 
+    # 小红书抓取超时。同样遵循快速失败并降级：正文取不到时由用户粘贴补全。
+    xiaohongshu_fetch_timeout: int = 10
+
     @field_validator("cors_allow_origins", mode="before")
     @classmethod
     def parse_origins(cls, value: object) -> object:
