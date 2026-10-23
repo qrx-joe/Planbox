@@ -700,6 +700,35 @@ dd {
   cursor: pointer;
 }
 
+.source-row > div { min-width: 0; }
+.activity-details { margin-top: var(--space-sm); }
+.detail-body {
+  margin-top: var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  overflow-wrap: anywhere;
+}
+.detail-body h4 { margin: var(--space-md) 0 var(--space-sm); }
+.detail-body p { white-space: pre-wrap; }
+.detail-note { color: var(--text-secondary); font-size: 13px; }
+.detail-body blockquote { margin: var(--space-sm) 0; padding-left: var(--space-sm);
+  border-left: 2px solid var(--primary); white-space: pre-wrap; }
+.correction-form { display: grid; gap: var(--space-sm); }
+.detail-body input, .detail-body textarea, .detail-body select {
+  display: block; width: 100%; min-width: 0; max-width: 100%;
+}
+.detail-body textarea { min-height: 76px; }
+.detail-body select {
+  font: inherit;
+  padding: var(--space-sm); color: var(--text-primary); background: var(--bg-elevated);
+  border: 1px solid var(--border-default); border-radius: var(--radius-sm);
+}
+.schedule-node { min-width: 0; margin-bottom: var(--space-sm); border: 1px solid var(--border-default); }
+.review-fields, .review-source { min-width: 0; overflow-wrap: anywhere; }
+.detail-body label { display: block; margin-top: var(--space-sm); }
+.detail-body button { justify-self: start; }
+
 /* === RESPONSIVE === */
 @media (max-width: 760px) {
   .app-shell {

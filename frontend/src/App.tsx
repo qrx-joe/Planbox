@@ -2,7 +2,6 @@ import {
   AlertTriangle,
   Bell,
   CalendarDays,
-  Check,
   ClipboardList,
   Clock,
   Download,
@@ -15,6 +14,9 @@ import {
 } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { deadlineStatus, formatRelativeDate, timeReviewMessage, type TimeIssue } from "./time";
+import { ActivityDetails } from "./ActivityDetails";
+import { ReviewCard, type ReviewQueueItem } from "./ReviewCard";
+import { requestDetail } from "./activity-details";
 
 type View = "inbox" | "review" | "activities" | "brief";
 
@@ -58,32 +60,6 @@ type SharePayload = {
 type PendingContent = {
   id: string;
   nextAction: string;
-};
-
-type ExtractedEventDraft = {
-  title: string;
-  event_type?: string | null;
-  registration_url?: string | null;
-  registration_deadline_at?: string | null;
-  event_start_at?: string | null;
-  location?: string | null;
-  is_online?: boolean | null;
-  missing_fields: string[];
-  confidence: number;
-  time_issues?: TimeIssue[];
-};
-
-type ReviewQueueItem = {
-  extraction: {
-    id: string;
-    source_item_id: string;
-    extracted: ExtractedEventDraft;
-    missing_fields: string[];
-    confidence?: number | null;
-  };
-  source_url?: string | null;
-  source_text?: string | null;
-  source_type: string;
 };
 
 type EventItem = {
@@ -141,15 +117,6 @@ const STATUS_OPTIONS = [
   { value: "expired", label: "已过期" },
 ] as const;
 
-type EvidenceItem = {
-  id: string;
-  field_name: string;
-  field_value?: string | null;
-  evidence_text?: string | null;
-  confidence?: number | null;
-  source_url?: string | null;
-};
-
 type DuplicateCandidate = {
   event: EventItem;
   match_reasons: string[];
@@ -168,7 +135,6 @@ export function App() {
     status: "",
     deadlineWithinDays: 0,
   });
-  const [evidences, setEvidences] = useState<EvidenceItem[]>([]);
   const [duplicates, setDuplicates] = useState<DuplicateCandidate[]>([]);
   const [duplicateBaseId, setDuplicateBaseId] = useState<string | null>(null);
   const [sharePayload, setSharePayload] = useState<SharePayload | null>(null);
@@ -285,7 +251,9 @@ export function App() {
     const response = await fetch(`${API_BASE_URL}/api/review-queue`);
     if (response.ok) {
       setReviewItems(await response.json());
+      return true;
     }
+    return false;
   }
 
   async function loadEvents() {
@@ -376,20 +344,20 @@ export function App() {
     }
   }
 
-  async function confirmReview(extractionId: string) {
+  async function confirmReview(extractionId: string, revision: number) {
     setBusyId(extractionId);
     setMessage(null);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/review-queue/${extractionId}/confirm`, {
+      await requestDetail<EventItem>(`${API_BASE_URL}/api/review-queue/${extractionId}/confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "interested" }),
+        body: JSON.stringify({ status: "interested", expected_revision: revision }),
       });
-      if (!response.ok) {
-        throw new Error("确认失败");
-      }
       setMessage("活动已入库，并标记为感兴趣");
       await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof TypeError ? "确认结果未知，请先检查活动库再重试"
+        : error instanceof Error ? error.message : "确认失败，请重新核对");
     } finally {
       setBusyId(null);
     }
@@ -403,10 +371,13 @@ export function App() {
         method: "POST",
       });
       if (!response.ok) {
-        throw new Error("放弃失败");
+        const error = await response.json().catch(() => ({}));
+        throw new Error(typeof error.detail === "string" ? error.detail : "放弃失败");
       }
       setMessage("已放弃该草稿");
       await refreshAll();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "放弃失败，请重新读取");
     } finally {
       setBusyId(null);
     }
@@ -431,16 +402,6 @@ export function App() {
       setMessage(error instanceof Error ? error.message : "状态更新失败");
     } finally {
       setBusyId(null);
-    }
-  }
-
-  async function loadEvidences(eventId: string) {
-    const response = await fetch(`${API_BASE_URL}/api/evidences/${eventId}`);
-    if (response.ok) {
-      const data = await response.json();
-      setEvidences(data.items ?? []);
-    } else {
-      setEvidences([]);
     }
   }
 
@@ -664,54 +625,10 @@ export function App() {
               <p className="empty">没有待确认草稿。很好，至少这里暂时不是第二个垃圾桶。</p>
             ) : (
               reviewItems.map((item) => (
-                <article className="review-card" key={item.extraction.id}>
-                  <div className="review-source">
-                    <p className="eyebrow">{item.source_type}</p>
-                    <p>{item.source_text || item.source_url}</p>
-                  </div>
-                  <div className="review-fields">
-                    <h2>{item.extraction.extracted.title}</h2>
-                    <dl>
-                      <Field label="类型" value={item.extraction.extracted.event_type} />
-                      <Field
-                        label="报名截止"
-                        value={item.extraction.extracted.registration_deadline_at}
-                      />
-                      <Field label="举办时间" value={item.extraction.extracted.event_start_at} />
-                      <Field label="地点" value={item.extraction.extracted.location} />
-                      <Field label="置信度" value={formatScore(item.extraction.confidence)} />
-                    </dl>
-                    {item.extraction.missing_fields.length > 0 ? (
-                      <p className="missing">
-                        缺失字段：{item.extraction.missing_fields.join("、")}
-                      </p>
-                    ) : null}
-                    {item.extraction.extracted.time_issues?.length ? (
-                      <p className="missing" role="status">
-                        时间待核对：{timeReviewMessage(item.extraction.extracted.time_issues)}
-                      </p>
-                    ) : null}
-                    <div className="composer-actions">
-                      <button
-                        type="button"
-                        disabled={busyId === item.extraction.id}
-                        onClick={() => confirmReview(item.extraction.id)}
-                      >
-                        <Check size={17} />
-                        确认入库
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary"
-                        disabled={busyId === item.extraction.id}
-                        onClick={() => rejectReview(item.extraction.id)}
-                      >
-                        <X size={17} />
-                        放弃
-                      </button>
-                    </div>
-                  </div>
-                </article>
+                <ReviewCard key={item.extraction.id} item={item} apiBase={API_BASE_URL}
+                  onSaved={async () => {
+                    if (!await loadReviewQueue()) throw new Error("草稿列表读取失败");
+                  }} onConfirm={confirmReview} onReject={rejectReview} />
               ))
             )}
           </section>
@@ -786,13 +703,6 @@ export function App() {
                         <button
                           type="button"
                           className="link-button"
-                          onClick={() => loadEvidences(event.id)}
-                        >
-                          查看证据
-                        </button>
-                        <button
-                          type="button"
-                          className="link-button"
                           onClick={() => checkDuplicates(event.id)}
                         >
                           检查重复
@@ -801,19 +711,7 @@ export function App() {
                       {event.time_issues?.length ? (
                         <p className="missing">时间待核对：{timeReviewMessage(event.time_issues)}</p>
                       ) : null}
-                      {evidences.length > 0 ? (
-                        <ul className="evidence-list">
-                          {evidences.map((item) => (
-                            <li key={item.id}>
-                              <strong>{item.field_name}</strong>
-                              {item.evidence_text ? `：${item.evidence_text}` : ""}
-                              {item.confidence != null ? (
-                                <span className="confidence"> {formatScore(item.confidence)}</span>
-                              ) : null}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
+                      <ActivityDetails eventId={event.id} apiBase={API_BASE_URL} onUpdated={loadEvents} />
                     </div>
                     <div className="row-actions">
                       <span className="status">{event.status}</span>
