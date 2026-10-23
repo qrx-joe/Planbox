@@ -2,25 +2,14 @@ from fastapi import APIRouter
 
 from backend.app.repositories.evidence_repository import EvidenceRepository
 from backend.app.schemas.evidence import EvidenceListResponse, EvidenceRead
+from backend.app.services.evidence_service import evidence_to_read
 
 router = APIRouter()
 repository = EvidenceRepository()
 
 
 def _to_read(row: dict[str, object]) -> EvidenceRead:
-    return EvidenceRead(
-        id=str(row["id"]),
-        event_id=row.get("event_id"),  # type: ignore[arg-type]
-        extraction_result_id=row.get("extraction_result_id"),  # type: ignore[arg-type]
-        source_item_id=str(row["source_item_id"]),
-        field_name=str(row["field_name"]),
-        field_value=row.get("field_value"),  # type: ignore[arg-type]
-        evidence_text=row.get("evidence_text"),  # type: ignore[arg-type]
-        confidence=row.get("confidence"),  # type: ignore[arg-type]
-        source_title=row.get("source_title"),  # type: ignore[arg-type]
-        source_url=row.get("source_url"),  # type: ignore[arg-type]
-        created_at=str(row["created_at"]),
-    )
+    return evidence_to_read(row)
 
 
 @router.get("", response_model=EvidenceListResponse)

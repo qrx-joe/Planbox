@@ -3,6 +3,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from backend.app.core.config import settings
+from backend.app.db.evidence_history import migrate_draft_history, migrate_evidence_history
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS source_items (
@@ -174,7 +175,10 @@ def initialize_database() -> None:
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
     with connect() as connection:
         connection.executescript(SCHEMA)
+        connection.execute("BEGIN")
         _run_migrations(connection)
+        migrate_evidence_history(connection)
+        migrate_draft_history(connection)
         connection.commit()
 
 
