@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from asyncio import CancelledError
 from dataclasses import replace
 
 from backend.app.core.evidence import FACT_FIELDS, locate_evidence
@@ -13,13 +14,23 @@ from backend.app.repositories.extraction_repository import (
     dumps_json,
     loads_json,
 )
-from backend.app.repositories.source_item_repository import SourceItemRepository
+from backend.app.repositories.source_item_repository import (
+    SourceItemRepository,
+    SourceStateConflict,
+)
 from backend.app.schemas.extraction import (
     EvidenceDraft,
     ExtractedEventDraft,
     ExtractionResultRead,
     ReviewQueueItem,
 )
+
+
+class ExtractionFailed(RuntimeError):
+    """模型抽取失败；对外仅提供固定提示，不泄漏上游异常或原文。"""
+
+
+EXTRACTION_ERROR = "抽取失败，请重试；若持续失败请检查模型配置或服务。"
 
 
 class ExtractionService:
@@ -74,63 +85,93 @@ class ExtractionService:
         return FakeLLMProvider()
 
     async def extract(self, source_item_id: str) -> ExtractionResultRead:
-        source = self.source_repository.get(source_item_id)
-        if source is None:
-            raise ValueError("Source item not found")
+        """抽取来源文本；成功原子保存候选/证据并标 parsed，失败标 failed 后抛出。
 
-        timestamp = now_iso()
-        provider = self._get_llm_provider()
-        text = str(source.get("raw_text") or "")
-        url = str(source.get("source_url") or "") or None
+        unparsed/failed 可尝试，parsed 复用既有结果（保留核对状态与更正），pending
+        或异常状态抛 SourceStateConflict；缺来源抛 KeyError，缺正文抛 ValueError。
+        模型失败抛 ExtractionFailed；持久化错误回滚并原样抛出。短事务认领阻止
+        独立请求重复调用，网络期间不持 SQLite 锁；进程崩溃遗留 pending 不自动接管。
+        """
+        with self.source_repository.edit(source_item_id) as (connection, source):
+            state = source["parse_status"]
+            if state == "parsed":
+                previous = self.extraction_repository.latest_for_source(source_item_id, connection)
+                if previous is None:
+                    raise SourceStateConflict("来源已标记解析成功但缺少结果，请先核对数据")
+                return self._to_read(previous)
+            if state not in {"unparsed", "failed"}:
+                raise SourceStateConflict("来源正在抽取或解析状态异常，请稍后重试或核对状态")
+            text = str(source.get("raw_text") or "")
+            if source.get("ingest_state") == "needs_content" or not text.strip():
+                raise ValueError("请先补全正文；当前抽取只支持文字，不能直接读取链接或截图")
+            self.source_repository.update_parse_status(
+                source_item_id, "pending", now_iso(), connection=connection,
+            )
 
-        if isinstance(provider, FakeLLMProvider):
-            draft = self._rule_based_extract(source)
-        else:
-            draft = await self._llm_extract(provider, text, url)
-
-        # 参照来自实际来源记录；仍不自动推断跨年或相对日期。
-        for reference_kind in ("published_at", "captured_at"):
-            reference = source.get(reference_kind)
+        try:
             try:
-                parse_time(reference)
-            except TimeValueError:
-                continue
-            draft.time_issues = [replace(
-                issue, reference_at=reference, reference_kind=reference_kind
-            ) for issue in draft.time_issues]
-            break
+                provider = self._get_llm_provider()
+                url = str(source.get("source_url") or "") or None
+                if isinstance(provider, FakeLLMProvider):
+                    draft = self._rule_based_extract(source)
+                else:
+                    draft = await self._llm_extract(provider, text, url)
+            except Exception as exc:
+                raise ExtractionFailed(EXTRACTION_ERROR) from exc
 
-        result_id = new_id("ext")
-        row = self.extraction_repository.create(
-            {
-                "id": result_id,
-                "source_item_id": source_item_id,
-                "status": "pending_review",
-                "extracted_json": dumps_json(draft.model_dump()),
-                "missing_fields": dumps_json(draft.missing_fields),
-                "confidence": draft.confidence,
-                "created_at": timestamp,
-                "updated_at": timestamp,
-            }
-        )
-        self.extraction_repository.create_evidences(
-            [
-                {
-                    "id": new_id("evd"),
-                    "event_id": None,
-                    "extraction_result_id": result_id,
+            # 参照来自实际来源记录；仍不自动推断跨年或相对日期。
+            for reference_kind in ("published_at", "captured_at"):
+                reference = source.get(reference_kind)
+                try:
+                    parse_time(reference)
+                except TimeValueError:
+                    continue
+                draft.time_issues = [replace(
+                    issue, reference_at=reference, reference_kind=reference_kind
+                ) for issue in draft.time_issues]
+                break
+
+            timestamp = now_iso()
+            result_id = new_id("ext")
+            with self.source_repository.edit(source_item_id) as (connection, current):
+                if current["parse_status"] != "pending":
+                    raise SourceStateConflict("抽取状态已改变，请重新读取来源状态")
+                row = self.extraction_repository.create({
+                    "id": result_id,
                     "source_item_id": source_item_id,
-                    "field_name": evidence.field,
-                    "field_value": evidence.value,
-                    "evidence_text": evidence.evidence,
-                    "confidence": evidence.confidence,
+                    "status": "pending_review",
+                    "extracted_json": dumps_json(draft.model_dump()),
+                    "missing_fields": dumps_json(draft.missing_fields),
+                    "confidence": draft.confidence,
                     "created_at": timestamp,
-                }
-                for evidence in draft.evidences
-            ]
-        )
-        self.source_repository.update_parse_status(source_item_id, "parsed", timestamp)
-        return self._to_read(row)
+                    "updated_at": timestamp,
+                }, connection)
+                self.extraction_repository.create_evidences([
+                    {
+                        "id": new_id("evd"),
+                        "event_id": None,
+                        "extraction_result_id": result_id,
+                        "source_item_id": source_item_id,
+                        "field_name": evidence.field,
+                        "field_value": evidence.value,
+                        "evidence_text": evidence.evidence,
+                        "confidence": evidence.confidence,
+                        "created_at": timestamp,
+                    }
+                    for evidence in draft.evidences
+                ], connection)
+                self.source_repository.update_parse_status(
+                    source_item_id, "parsed", timestamp, connection=connection,
+                )
+                result = self._to_read(row)
+            return result
+        except (Exception, CancelledError):
+            with self.source_repository.edit(source_item_id) as (connection, current):
+                if current["parse_status"] == "pending":
+                    self.source_repository.update_parse_status(
+                        source_item_id, "failed", now_iso(), EXTRACTION_ERROR, connection,
+                    )
+            raise
 
     async def _llm_extract(
         self,

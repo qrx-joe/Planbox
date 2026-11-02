@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 from backend.app.core.time import now_iso
+from backend.app.repositories.extraction_repository import ExtractionRepository
 from backend.app.repositories.source_item_repository import SourceItemRepository
 from backend.app.schemas.share import (
     ContentCompleteRequest,
@@ -103,14 +104,18 @@ class ShareIngestService:
             fetch_attempted=fetch_attempted,
             fetch_succeeded=fetch_succeeded,
             fetch_error=fetch_error,
-            next_action=self._next_action(state, fetch_error),
+            next_action=self._next_action(state, fetch_error, extraction_started),
             extraction_started=extraction_started,
         )
 
     async def complete_content(
         self, source_item_id: str, payload: ContentCompleteRequest
     ) -> ContentCompleteResponse:
-        """用户粘贴正文后补全条目。已就绪的条目视为重复提交，直接返回原状态。"""
+        """保存正文；相同输入保留状态，未抽取/失败可重试，成功复用结果 ID。
+
+        auto_extract=false 只保存；正在抽取时允许同输入重试，改变输入返回冲突。
+        正文保存与模型抽取分别反馈，后者失败不撤销已保存正文。
+        """
         item = self.source_service.get(source_item_id)
         if item is None:
             raise KeyError(source_item_id)
@@ -120,9 +125,6 @@ class ShareIngestService:
             raise ValueError(
                 f"正文太短（{len(raw_text)} 字），至少需要 {MIN_CONTENT_LENGTH} 字才能提取活动信息"
             )
-
-        # 幂等：已经补全过且正文一致时不重复抽取
-        already_ready = item.ingest_state == "ready" and item.raw_text == raw_text
 
         title = _clean_text(payload.title) or item.title
         updated = self.source_service.update_content(
@@ -134,10 +136,13 @@ class ShareIngestService:
 
         extraction_started = False
         extraction_id: str | None = None
-        if payload.auto_extract and not already_ready:
+        if payload.auto_extract and updated.parse_status in {"unparsed", "failed"}:
             extraction_started = await self._extract(source_item_id)
-            if extraction_started:
-                extraction_id = _latest_extraction_id(source_item_id)
+
+        current = self.source_service.get(source_item_id)
+        if current is not None and current.parse_status == "parsed":
+            previous = ExtractionRepository().latest_for_source(source_item_id)
+            extraction_id = str(previous["id"]) if previous else None
 
         return ContentCompleteResponse(
             source_item_id=updated.id,
@@ -165,15 +170,17 @@ class ShareIngestService:
 
         try:
             await ExtractionService().extract(source_item_id)
-            self.source_service.mark_extract_pending(source_item_id)
             return True
         except Exception:
             # 抽取失败用户仍可手动重试，不该看到创建失败
             return False
 
-    def _next_action(self, state: str, fetch_error: str | None) -> str:
+    def _next_action(
+        self, state: str, fetch_error: str | None, extraction_started: bool,
+    ) -> str:
         if state == "ready":
-            return "正文已就绪，已生成待确认草稿。"
+            return ("正文已就绪，已生成待确认草稿。" if extraction_started
+                    else "正文已保存，抽取失败，请在收集箱重试抽取。")
         if fetch_error:
             return fetch_error
         return (
@@ -226,21 +233,6 @@ def _build_meta(
     if fetch_error:
         meta["fetch_error"] = fetch_error
     return meta
-
-
-def _latest_extraction_id(source_item_id: str) -> str | None:
-    from backend.app.db.database import connect
-
-    with connect() as connection:
-        row = connection.execute(
-            """
-            SELECT id FROM extraction_results
-            WHERE source_item_id = ?
-            ORDER BY created_at DESC LIMIT 1
-            """,
-            (source_item_id,),
-        ).fetchone()
-    return str(row["id"]) if row else None
 
 
 # 供 source_service 复用

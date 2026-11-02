@@ -6,15 +6,33 @@ from backend.app.db.database import connect
 
 
 class ExtractionRepository:
-    def create(self, values: dict[str, object]) -> dict[str, object]:
+    def create(
+        self, values: dict[str, object], connection: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        """保存候选；传入连接时不独立提交，以便与证据和来源状态原子落库。"""
         columns = ", ".join(values.keys())
         placeholders = ", ".join(f":{key}" for key in values)
         query = f"INSERT INTO extraction_results ({columns}) VALUES ({placeholders})"
 
-        with connect() as connection:
-            connection.execute(query, values)
-            connection.commit()
-            return self._get_or_raise(str(values["id"]))
+        with (nullcontext(connection) if connection is not None else connect()) as active:
+            active.execute(query, values)
+            if connection is None:
+                active.commit()
+            row = self.get(str(values["id"]), active)
+            if row is None:
+                raise RuntimeError("Extraction result was not persisted")
+            return row
+
+    def latest_for_source(
+        self, source_item_id: str, connection: sqlite3.Connection | None = None,
+    ) -> dict[str, object] | None:
+        """返回来源最近插入的结果（含更正版本）；同秒按 rowid 排序，不过滤核对状态。"""
+        with (nullcontext(connection) if connection is not None else connect()) as active:
+            row = active.execute(
+                "SELECT id FROM extraction_results WHERE source_item_id = ? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1", (source_item_id,),
+            ).fetchone()
+            return self.get(str(row["id"]), active) if row else None
 
     def list_pending(self) -> list[dict[str, object]]:
         with connect() as connection:
@@ -136,12 +154,6 @@ class ExtractionRepository:
             )
             if connection is None:
                 active.commit()
-
-    def _get_or_raise(self, extraction_result_id: str) -> dict[str, object]:
-        row = self.get(extraction_result_id)
-        if row is None:
-            raise RuntimeError("Extraction result was not persisted")
-        return row
 
 
 def dumps_json(value: object) -> str:

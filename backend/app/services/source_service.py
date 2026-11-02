@@ -73,7 +73,7 @@ class SourceService:
         title: str | None,
         published_at: str | None,
     ) -> SourceItemRead:
-        """用户粘贴正文后的补全。会清掉旧的 parse_error 并重置为待解析。"""
+        """补全来源；输入改变才重置解析状态，同内容重试保留状态和错误。"""
         timestamp = now_iso()
         row = self.repository.update_content(
             source_item_id=source_item_id,
@@ -110,9 +110,6 @@ class SourceService:
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
         )
-
-    def mark_extract_pending(self, source_item_id: str) -> None:
-        self.repository.update_parse_status(source_item_id, "pending", now_iso())
 
     async def save_asset(
         self, source_item_id: str, file: UploadFile

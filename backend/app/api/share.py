@@ -51,6 +51,7 @@ Page({
 
 from fastapi import APIRouter, HTTPException, status
 
+from backend.app.repositories.source_item_repository import SourceStateConflict
 from backend.app.schemas.share import (
     ContentCompleteRequest,
     ContentCompleteResponse,
@@ -85,6 +86,8 @@ async def complete_content(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Source item not found"
         ) from exc
+    except SourceStateConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
