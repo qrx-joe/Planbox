@@ -11,7 +11,7 @@ from backend.app.repositories.correction_repository import (
     field_value,
 )
 from backend.app.schemas.correction import CorrectionList, CorrectionRead
-from backend.app.schemas.event import EventUpdate
+from backend.app.schemas.event import STATUS_TRANSITIONS, EventStatusError, EventUpdate
 
 
 class CorrectionConflict(ValueError):
@@ -79,6 +79,15 @@ class CorrectionService:
                 connection, event_id, payload.source_item_id,
             ):
                 raise ValueError("所选来源不属于此活动")
+            if "status" in values and str(values["status"]) != str(current.get("status")):
+                # 字段修正入口与状态端点共用同一迁移矩阵，不允许绕道改出非法流转
+                current_status = str(current.get("status"))
+                allowed = STATUS_TRANSITIONS.get(current_status, set())
+                if values["status"] not in allowed:
+                    raise EventStatusError(
+                        f"不能从 {current_status} 直接变更为 {values['status']}，"
+                        f"允许的目标状态：{'、'.join(sorted(allowed)) or '无'}"
+                    )
             candidate = {**current, **values}
             self._validate(candidate, values)
             changes = []

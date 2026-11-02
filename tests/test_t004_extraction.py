@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
@@ -16,7 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.app.core.config import PROJECT_ROOT, settings
-from backend.app.core.time import now_iso
+from backend.app.core.time import now_iso, now_shanghai
 from backend.app.db.database import connect, initialize_database
 from backend.app.providers.llm import BaseLLMProvider, OpenAIProvider
 from backend.app.repositories.source_item_repository import SourceItemRepository
@@ -56,6 +57,7 @@ class ControlledProvider(BaseLLMProvider):
 
 @pytest.fixture
 def api(monkeypatch):
+    from backend.app.api import events as events_api
     from backend.app.api import review, share, source_items
 
     def forbidden(*args, **kwargs):
@@ -84,6 +86,7 @@ def api(monkeypatch):
         app.include_router(source_items.router, prefix="/api/source-items")
         app.include_router(share.router, prefix="/api/share")
         app.include_router(review.router, prefix="/api/review-queue")
+        app.include_router(events_api.router, prefix="/api/events")
         with TestClient(app, raise_server_exceptions=False) as client:
             client.provider = provider
             yield client
@@ -383,3 +386,141 @@ def test_cancelled_model_call_leaves_retryable_state(api):
     assert counts() == (0, 0, 0)
     api.provider.error = None
     assert api.post(f"/api/source-items/{source_id}/extract").status_code == 200
+
+
+# ---------- T-004 收尾：Confirm 幂等重试 / PATCH 迁移矩阵 / 陈旧 pending 接管 ----------
+
+def _first_draft(api):
+    items = api.get("/api/review-queue").json()
+    assert items, "缺少待核对草稿"
+    return items[0]["extraction"]
+
+
+def _force_pending(source_id, minutes_ago):
+    """模拟进程崩溃遗留的 pending：直接改解析状态与认领时间戳。"""
+    stale = (now_shanghai() - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds")
+    with connect() as connection:
+        connection.execute(
+            "UPDATE source_items SET parse_status = 'pending', updated_at = ? WHERE id = ?",
+            (stale, source_id),
+        )
+        connection.commit()
+
+
+def test_confirm_retry_returns_same_event_without_duplicates(api):
+    """确认响应丢失后的原样重试：返回同一活动，不重复建档或新增证据。"""
+    enter(api, "manual")
+    draft = _first_draft(api)
+    payload = {"status": "interested", "expected_revision": draft["revision"]}
+    first = api.post(f"/api/review-queue/{draft['id']}/confirm", json=payload)
+    assert first.status_code == 200, first.text
+    after_first = counts()
+    second = api.post(f"/api/review-queue/{draft['id']}/confirm", json=payload)
+    assert second.status_code == 200, second.text
+    assert second.json()["id"] == first.json()["id"]
+    assert counts() == after_first
+
+
+def test_confirm_retry_with_different_payload_returns_original_event(api):
+    """已确认草稿的重试携带不同 status/extracted：只读返回原活动，不二次修改。"""
+    enter(api, "manual")
+    draft = _first_draft(api)
+    first = api.post(f"/api/review-queue/{draft['id']}/confirm", json={"status": "interested"})
+    assert first.status_code == 200, first.text
+    second = api.post(f"/api/review-queue/{draft['id']}/confirm", json={
+        "status": "applied", "extracted": {"title": "确认时改标题"},
+    })
+    assert second.status_code == 200, second.text
+    body = second.json()
+    assert body["id"] == first.json()["id"]
+    assert body["status"] == "interested"
+    assert body["title"] == "合成活动"
+
+
+def test_confirm_after_reject_is_clear_conflict(api):
+    """已放弃草稿的确认：返回明确的 409 与文案，不建档。"""
+    enter(api, "manual")
+    draft = _first_draft(api)
+    assert api.post(f"/api/review-queue/{draft['id']}/reject").status_code == 204
+    result = api.post(f"/api/review-queue/{draft['id']}/confirm", json={"status": "interested"})
+    assert result.status_code == 409
+    assert "放弃" in result.json()["detail"]
+    assert counts()[2] == 0
+
+
+def test_legacy_confirmed_without_event_anchor_is_conflict(api):
+    """迁移前已确认且无锚点可查的老数据：409 指引活动库，不猜测返回。"""
+    enter(api, "manual")
+    draft = _first_draft(api)
+    confirmed = api.post(f"/api/review-queue/{draft['id']}/confirm", json={"status": "interested"})
+    assert confirmed.status_code == 200, confirmed.text
+    with connect() as connection:
+        connection.execute("DELETE FROM evidences WHERE extraction_result_id = ?", (draft["id"],))
+        connection.execute(
+            "UPDATE extraction_results SET confirmed_event_id = NULL WHERE id = ?",
+            (draft["id"],),
+        )
+        connection.commit()
+    result = api.post(f"/api/review-queue/{draft['id']}/confirm", json={"status": "interested"})
+    assert result.status_code == 409
+    assert "活动库" in result.json()["detail"]
+
+
+def test_concurrent_confirm_creates_single_event(api):
+    """两个并发确认同一草稿：恰好建档一次，双方拿到同一活动。"""
+    enter(api, "manual")
+    draft = _first_draft(api)
+    payload = {"status": "interested", "expected_revision": draft["revision"]}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(
+            lambda _: api.post(f"/api/review-queue/{draft['id']}/confirm", json=payload),
+            range(2),
+        ))
+    assert [result.status_code for result in results] == [200, 200]
+    assert results[0].json()["id"] == results[1].json()["id"]
+    assert counts()[2] == 1
+
+
+def test_event_patch_status_respects_transition_matrix(api):
+    """字段修正入口与状态端点共用迁移矩阵：非法迁移两处一致拒绝。"""
+    enter(api, "manual")
+    draft = _first_draft(api)
+    confirmed = api.post(
+        f"/api/review-queue/{draft['id']}/confirm", json={"status": "needs_review"}
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    event_id = confirmed.json()["id"]
+
+    via_patch = api.patch(f"/api/events/{event_id}", json={"status": "done"})
+    assert via_patch.status_code == 400, via_patch.text
+    assert "不能从 needs_review" in via_patch.json()["detail"]
+    via_status = api.patch(f"/api/events/{event_id}/status", json={"status": "done"})
+    assert via_status.status_code == 400
+
+    legal = api.patch(
+        f"/api/events/{event_id}", json={"status": "interested", "location": "上海"}
+    )
+    assert legal.status_code == 200, legal.text
+    assert legal.json()["status"] == "interested"
+    assert legal.json()["location"] == "上海"
+
+    idempotent = api.patch(
+        f"/api/events/{event_id}", json={"status": "interested", "organizer": "新主办方"}
+    )
+    assert idempotent.status_code == 200, idempotent.text
+    assert idempotent.json()["organizer"] == "新主办方"
+
+
+def test_stale_pending_reclaimed_after_timeout(api):
+    """崩溃遗留 pending：宽限期内仍拒绝，超过阈值后可重新认领并完成抽取。"""
+    source_id = source(api)
+    _force_pending(source_id, minutes_ago=0)
+    busy = api.post(f"/api/source-items/{source_id}/extract")
+    assert busy.status_code == 409
+    assert busy.json()["detail"] == "来源正在抽取，请稍后重试；长时间无结果可稍后再试或核对状态"
+
+    _force_pending(source_id, minutes_ago=20)
+    reclaimed = api.post(f"/api/source-items/{source_id}/extract")
+    assert reclaimed.status_code == 200, reclaimed.text
+    assert current(api, source_id)["parse_status"] == "parsed"
+    assert _first_draft(api)["extracted"]["title"] == "合成活动"

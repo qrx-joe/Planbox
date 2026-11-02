@@ -18,6 +18,7 @@ from backend.app.schemas.event import (
     EventConfirm,
     EventListResponse,
     EventRead,
+    EventStatusError,
     EventStatusUpdate,
     EventUpdate,
 )
@@ -25,9 +26,8 @@ from backend.app.schemas.extraction import DraftEdit, EvidenceDraft, ExtractedEv
 from backend.app.services.correction_service import CorrectionConflict, CorrectionService
 from backend.app.services.draft_service import DraftService
 
-
-class EventStatusError(ValueError):
-    """状态流转不合法。"""
+# EventStatusError 定义在 schemas/event.py，这里 re-export 保持既有导入路径可用
+__all__ = ["EventService", "EventStatusError", "event_row_to_read"]
 
 
 class EventService:
@@ -50,6 +50,12 @@ class EventService:
 
     def _confirm_locked(self, extraction_result_id, payload, connection, extraction) -> EventRead:
         if extraction["status"] != "pending_review":
+            # 已确认/已放弃是可解释的终态：前者幂等返回原活动（响应丢失重试），
+            # 后者明确告知放弃，不与"状态异常"混成同一个 400。
+            if extraction["status"] == "confirmed":
+                return self._retry_confirmed(extraction_result_id, payload, connection, extraction)
+            if extraction["status"] == "rejected":
+                raise CorrectionConflict("草稿已放弃，不能确认入库；如需保留请重新收集")
             raise ValueError("Extraction result is not pending review")
         if (payload.expected_revision is not None
                 and payload.expected_revision != extraction["revision"]):
@@ -108,11 +114,37 @@ class EventService:
             evidences=draft.evidences,
             connection=connection,
         )
-        self.extraction_repository.update_status(
-            extraction_result_id, "confirmed", timestamp, connection,
+        self.extraction_repository.mark_confirmed(
+            extraction_result_id, event_id, timestamp, connection,
         )
 
         return event_row_to_read(row)
+
+    def _retry_confirmed(self, extraction_result_id, payload, connection, extraction) -> EventRead:
+        """已确认草稿的重复确认只读返回原活动；不重复建档，也不应用重试带来的修改。"""
+        if (payload.expected_revision is not None
+                and payload.expected_revision != extraction["revision"]):
+            raise CorrectionConflict("草稿已被更正，请重新读取后再确认")
+        event_id = extraction.get("confirmed_event_id")
+        if not event_id:
+            # 迁移前确认的老数据没有锚点列值，用已挂到活动的证据兜底定位
+            row = connection.execute(
+                """
+                SELECT DISTINCT event_id FROM evidences
+                WHERE extraction_result_id = ? AND event_id IS NOT NULL
+                LIMIT 1
+                """,
+                (extraction_result_id,),
+            ).fetchone()
+            event_id = row["event_id"] if row else None
+        if not event_id:
+            raise CorrectionConflict("草稿已确认但无法定位原活动，请在活动库中查看")
+        row = connection.execute(
+            "SELECT * FROM events WHERE id = ?", (event_id,),
+        ).fetchone()
+        if row is None:
+            raise CorrectionConflict("草稿已确认，但原活动已被删除；请在活动库中核对")
+        return event_row_to_read(dict(row))
 
     def _persist_evidences(
         self,

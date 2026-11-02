@@ -84,6 +84,23 @@ class ExtractionRepository:
             if connection is None:
                 active.commit()
 
+    def mark_confirmed(
+        self, extraction_result_id: str, event_id: str, updated_at: str,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        """确认时把状态与活动锚点一起写；重复确认靠锚点幂等返回原活动。"""
+        with (nullcontext(connection) if connection is not None else connect()) as active:
+            active.execute(
+                """
+                UPDATE extraction_results
+                SET status = 'confirmed', confirmed_event_id = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (event_id, updated_at, extraction_result_id),
+            )
+            if connection is None:
+                active.commit()
+
     def list_field_names(
         self, extraction_result_id: str, connection: sqlite3.Connection | None = None,
     ) -> set[str]:

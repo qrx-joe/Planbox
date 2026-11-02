@@ -3,11 +3,14 @@ from __future__ import annotations
 import re
 from asyncio import CancelledError
 from dataclasses import replace
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
+from backend.app.core.config import settings
 from backend.app.core.evidence import FACT_FIELDS, locate_evidence
 from backend.app.core.ids import new_id
 from backend.app.core.temporal import TimeValueError, parse_time
-from backend.app.core.time import now_iso
+from backend.app.core.time import now_iso, now_shanghai
 from backend.app.providers.llm import BaseLLMProvider, FakeLLMProvider, OpenAIProvider
 from backend.app.repositories.extraction_repository import (
     ExtractionRepository,
@@ -84,13 +87,36 @@ class ExtractionService:
             )
         return FakeLLMProvider()
 
+    # 认领后超过该时限仍停在 pending，判定为进程崩溃遗留，允许重新认领；
+    # 阈值远大于模型调用超时，正常在途请求不会被二次认领。
+    STALE_PENDING_AFTER = timedelta(minutes=15)
+
+    def _reject_in_flight_or_stale(self, source: dict[str, object]) -> None:
+        """宽限期内视为在途抽取；认领时间解析失败时保守拒绝，不误接管。
+
+        接管后旧事务即使恢复，写回前会重读状态并因不是 pending 而中止，
+        不会覆盖新一次抽取的结果。
+        """
+        claimed = None
+        try:
+            claimed = datetime.fromisoformat(str(source["updated_at"]))
+        except ValueError:
+            claimed = None
+        if claimed is not None and claimed.tzinfo is None:
+            claimed = claimed.replace(tzinfo=ZoneInfo(settings.timezone))
+        if claimed is None or now_shanghai() - claimed < self.STALE_PENDING_AFTER:
+            raise SourceStateConflict(
+                "来源正在抽取，请稍后重试；长时间无结果可稍后再试或核对状态"
+            )
+
     async def extract(self, source_item_id: str) -> ExtractionResultRead:
         """抽取来源文本；成功原子保存候选/证据并标 parsed，失败标 failed 后抛出。
 
-        unparsed/failed 可尝试，parsed 复用既有结果（保留核对状态与更正），pending
-        或异常状态抛 SourceStateConflict；缺来源抛 KeyError，缺正文抛 ValueError。
-        模型失败抛 ExtractionFailed；持久化错误回滚并原样抛出。短事务认领阻止
-        独立请求重复调用，网络期间不持 SQLite 锁；进程崩溃遗留 pending 不自动接管。
+        unparsed/failed 可尝试，parsed 复用既有结果（保留核对状态与更正）；
+        pending 在宽限期内抛 SourceStateConflict，超过 STALE_PENDING_AFTER 视为
+        上次进程崩溃遗留、允许重新认领；其余异常状态同样抛 SourceStateConflict。
+        缺来源抛 KeyError，缺正文抛 ValueError。模型失败抛 ExtractionFailed；
+        持久化错误回滚并原样抛出。短事务认领阻止独立请求重复调用，网络期间不持锁。
         """
         with self.source_repository.edit(source_item_id) as (connection, source):
             state = source["parse_status"]
@@ -99,8 +125,10 @@ class ExtractionService:
                 if previous is None:
                     raise SourceStateConflict("来源已标记解析成功但缺少结果，请先核对数据")
                 return self._to_read(previous)
-            if state not in {"unparsed", "failed"}:
-                raise SourceStateConflict("来源正在抽取或解析状态异常，请稍后重试或核对状态")
+            if state == "pending":
+                self._reject_in_flight_or_stale(source)
+            elif state not in {"unparsed", "failed"}:
+                raise SourceStateConflict("来源解析状态异常，请核对状态")
             text = str(source.get("raw_text") or "")
             if source.get("ingest_state") == "needs_content" or not text.strip():
                 raise ValueError("请先补全正文；当前抽取只支持文字，不能直接读取链接或截图")

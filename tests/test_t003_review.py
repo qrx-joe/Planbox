@@ -160,7 +160,10 @@ def test_confirm_uses_saved_revision_and_freezes_review(api):
     assert result.json()["organizer"] == "乙机构"
     assert edit(api, {"organizer": "不允许"}).status_code == 409
     assert not history(api)["items"][0]["can_retract"]
-    assert api.post("/api/review-queue/a/confirm", json={}).status_code == 400
+    # 已确认草稿的重复确认（如响应丢失后的重试）幂等返回原活动，不再是无解释的 400
+    repeated = api.post("/api/review-queue/a/confirm", json={})
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["id"] == result.json()["id"]
 
 
 def test_legacy_confirm_override_is_audited_not_trusted_as_evidence(api):

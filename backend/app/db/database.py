@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS extraction_results (
   extracted_json TEXT NOT NULL,
   missing_fields TEXT,
   confidence REAL,
+  confirmed_event_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (source_item_id) REFERENCES source_items(id)
@@ -205,6 +206,12 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
             "source_items",
             "source_meta",
             "ALTER TABLE source_items ADD COLUMN source_meta TEXT",
+        ),
+        (
+            # 确认时记录建出的活动，供响应丢失后的重复确认幂等返回原活动
+            "extraction_results",
+            "confirmed_event_id",
+            "ALTER TABLE extraction_results ADD COLUMN confirmed_event_id TEXT",
         ),
     )
     for table, column, alter in migrations:

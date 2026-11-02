@@ -44,6 +44,10 @@ STATUS_TRANSITIONS: dict[str, set[str]] = {
 ACTIONABLE_STATUSES: frozenset[str] = frozenset({"interested", "applied"})
 
 
+class EventStatusError(ValueError):
+    """状态流转不合法。与迁移矩阵同处定义，供状态端点和字段修正端点共用。"""
+
+
 class EventConfirm(BaseModel):
     extracted: ExtractedEventDraft | None = None
     status: str = "interested"
