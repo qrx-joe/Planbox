@@ -223,6 +223,8 @@ def _run_migrations(connection: sqlite3.Connection) -> None:
 def connect() -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(settings.database_path)
     connection.row_factory = sqlite3.Row
+    # SQLite 默认不启用外键；打开后引用缺失在写入时即被拒绝，避免悄悄产生孤儿行。
+    connection.execute("PRAGMA foreign_keys = ON")
     try:
         yield connection
     finally:

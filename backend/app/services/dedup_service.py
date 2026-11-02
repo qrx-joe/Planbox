@@ -78,9 +78,25 @@ class DedupService:
         return DuplicateCheckResponse(candidates=probe, has_duplicates=bool(probe))
 
     def merge(self, target_id: str, source_id: str) -> EventMergeResponse:
-        target = self.event_repository.get(target_id)
-        source = self.event_repository.get(source_id)
-        if target is None or source is None:
+        """单事务合并：字段补全、来源/证据/提醒迁移与删除源活动要么全部提交，要么整体回滚。"""
+        from backend.app.db.database import connect
+
+        with connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                return self._merge_locked(target_id, source_id, connection)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _merge_locked(self, target_id, source_id, connection) -> EventMergeResponse:
+        target = dict(connection.execute(
+            "SELECT * FROM events WHERE id = ?", (target_id,),
+        ).fetchone() or {})
+        source = dict(connection.execute(
+            "SELECT * FROM events WHERE id = ?", (source_id,),
+        ).fetchone() or {})
+        if not target or not source:
             raise KeyError("event")
         if target_id == source_id:
             raise ValueError("Cannot merge an event into itself")
@@ -128,18 +144,19 @@ class DedupService:
             filled_fields.append("confidence")
 
         if updates:
-            self.event_repository.update(target_id, updates)
+            self.event_repository.update(target_id, updates, connection)
 
-        transferred = self._transfer_sources(source_id, target_id)
+        transferred = self._transfer_sources(source_id, target_id, connection)
 
         # 状态取两者中更「可行动」的一个
         status = self._merge_status(str(target.get("status")), str(source.get("status")))
         if status != target.get("status"):
-            self.event_repository.update(target_id, {"status": status})
+            self.event_repository.update(target_id, {"status": status}, connection)
             filled_fields.append("status")
 
-        merged_row = self.event_repository.get_or_raise(target_id)
-        self.event_repository.delete(source_id)
+        merged_row = self.event_repository.get_or_raise(target_id, connection)
+        self.event_repository.delete(source_id, connection)
+        connection.commit()
 
         return EventMergeResponse(
             merged=event_row_to_read(merged_row),
@@ -273,37 +290,40 @@ class DedupService:
             merged.append(item)
         return merged
 
-    def _transfer_sources(self, source_id: str, target_id: str) -> int:
-        """把 source 的来源关联迁移到 target，保持多来源可溯源（PRD 8.9）。
+    def _transfer_sources(
+        self, source_id: str, target_id: str, connection,
+    ) -> int:
+        """把 source 的来源关联、证据、更正历史与提醒改挂 target。
 
-        同时把该活动下的证据改挂到 target，source 随后被删除，证据不丢失。
+        调用方必须持有显式事务连接；提醒是用户设置的时间点，合并不丢，
+        评分缓存可重算、随源活动清理由 delete 完成。
         """
-        from backend.app.db.database import connect
-
-        with connect() as connection:
-            rows = connection.execute(
-                "SELECT source_item_id FROM event_sources WHERE event_id = ?",
-                (source_id,),
-            ).fetchall()
-            timestamp = now_iso()
-            for row in rows:
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO event_sources (event_id, source_item_id, created_at)
-                    VALUES (?, ?, ?)
-                    """,
-                    (target_id, row["source_item_id"], timestamp),
-                )
+        rows = connection.execute(
+            "SELECT source_item_id FROM event_sources WHERE event_id = ?",
+            (source_id,),
+        ).fetchall()
+        timestamp = now_iso()
+        for row in rows:
             connection.execute(
-                "UPDATE evidences SET event_id = ? WHERE event_id = ?",
-                (target_id, source_id),
+                """
+                INSERT OR IGNORE INTO event_sources (event_id, source_item_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (target_id, row["source_item_id"], timestamp),
             )
-            connection.execute(
-                "UPDATE event_corrections SET event_id = ? WHERE event_id = ?",
-                (target_id, source_id),
-            )
-            connection.commit()
-            return len(rows)
+        connection.execute(
+            "UPDATE evidences SET event_id = ? WHERE event_id = ?",
+            (target_id, source_id),
+        )
+        connection.execute(
+            "UPDATE event_corrections SET event_id = ? WHERE event_id = ?",
+            (target_id, source_id),
+        )
+        connection.execute(
+            "UPDATE reminders SET event_id = ? WHERE event_id = ?",
+            (target_id, source_id),
+        )
+        return len(rows)
 
     def _backfill_evidences(self, target_id: str, source_id: str) -> float | None:
         """用 source 的证据补全 target，返回合并后的活动置信度。

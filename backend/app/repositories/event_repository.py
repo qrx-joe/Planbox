@@ -259,32 +259,53 @@ class EventRepository:
             ).fetchone()
             return dict(row) if row else None
 
-    def update(self, event_id: str, values: dict[str, object]) -> dict[str, object]:
+    def update(
+        self, event_id: str, values: dict[str, object],
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        """更新活动列；传入用例连接时不独立提交，供合并等单事务路径使用。"""
         if not values:
-            return self.get_or_raise(event_id)
+            return self.get_or_raise(event_id, connection)
 
         assignments = ", ".join(f"{key} = :{key}" for key in values)
-        with connect() as connection:
-            connection.execute(
+        with (nullcontext(connection) if connection is not None else connect()) as active:
+            active.execute(
                 f"UPDATE events SET {assignments} WHERE id = :event_id",
                 {**values, "event_id": event_id},
             )
-            connection.commit()
-        return self.get_or_raise(event_id)
+            if connection is None:
+                active.commit()
+            row = active.execute(
+                "SELECT * FROM events WHERE id = ?", (event_id,),
+            ).fetchone()
+        return dict(row) if row else self.get_or_raise(event_id)
 
-    def get_or_raise(self, event_id: str) -> dict[str, object]:
-        row = self.get(event_id)
+    def get_or_raise(
+        self, event_id: str,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        row = self.get(event_id) if connection is None else None
+        if connection is not None:
+            found = connection.execute(
+                "SELECT * FROM events WHERE id = ?", (event_id,),
+            ).fetchone()
+            row = dict(found) if found else None
         if row is None:
             raise KeyError(event_id)
         return row
 
-    def delete(self, event_id: str) -> None:
-        with connect() as connection:
-            connection.execute("DELETE FROM evidences WHERE event_id = ?", (event_id,))
-            connection.execute(
+    def delete(
+        self, event_id: str,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        """删除活动及其从属行；传入用例连接时随调用方事务提交或回滚。"""
+        with (nullcontext(connection) if connection is not None else connect()) as active:
+            active.execute("DELETE FROM evidences WHERE event_id = ?", (event_id,))
+            active.execute(
                 "DELETE FROM opportunity_scores WHERE event_id = ?", (event_id,)
             )
-            connection.execute("DELETE FROM reminders WHERE event_id = ?", (event_id,))
-            connection.execute("DELETE FROM event_sources WHERE event_id = ?", (event_id,))
-            connection.execute("DELETE FROM events WHERE id = ?", (event_id,))
-            connection.commit()
+            active.execute("DELETE FROM reminders WHERE event_id = ?", (event_id,))
+            active.execute("DELETE FROM event_sources WHERE event_id = ?", (event_id,))
+            active.execute("DELETE FROM events WHERE id = ?", (event_id,))
+            if connection is None:
+                active.commit()

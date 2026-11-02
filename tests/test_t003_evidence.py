@@ -101,6 +101,12 @@ def test_draft_read_does_not_claim_value_is_current(evidence_api):
     from backend.app.db.database import connect
 
     with connect() as connection:
+        # 外键启用后证据必须挂在真实存在的草稿上；先补父行再改挂
+        connection.execute(
+            "INSERT INTO extraction_results "
+            "(id,source_item_id,status,extracted_json,created_at,updated_at) "
+            "VALUES ('ext','src','pending_review','','now','now')"
+        )
         connection.execute("UPDATE evidences SET event_id=NULL, extraction_result_id='ext'")
         connection.commit()
     result = evidence_api.get("/api/evidences", params={"extraction_result_id": "ext"})
