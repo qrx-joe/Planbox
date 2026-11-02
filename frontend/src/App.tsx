@@ -1,14 +1,12 @@
 import {
-  AlertTriangle,
   Bell,
-  CalendarDays,
   ClipboardList,
-  Clock,
   Download,
   Inbox,
+  Radar,
+  RefreshCw,
   Search,
   Sparkles,
-  Star,
   Upload,
   X,
 } from "lucide-react";
@@ -17,7 +15,7 @@ import { deadlineStatus, formatRelativeDate, timeReviewMessage, type TimeIssue }
 import { isFetchableLink } from "./link-rules";
 import { ActivityDetails } from "./ActivityDetails";
 import { ReviewCard, type ReviewQueueItem } from "./ReviewCard";
-import { requestDetail } from "./activity-details";
+import { fieldLabel, requestDetail } from "./activity-details";
 
 type View = "inbox" | "review" | "activities" | "brief";
 
@@ -109,7 +107,7 @@ type EventFilters = {
 };
 
 const STATUS_OPTIONS = [
-  { value: "", label: "全部状态" },
+  { value: "", label: "全部" },
   { value: "interested", label: "感兴趣" },
   { value: "applied", label: "已报名" },
   { value: "rejected", label: "已放弃" },
@@ -117,6 +115,60 @@ const STATUS_OPTIONS = [
   { value: "done", label: "已结束" },
   { value: "expired", label: "已过期" },
 ] as const;
+
+/** event.status → 展示文案；未知值原样显示，不编造状态 */
+const STATUS_LABELS: Record<string, string> = Object.fromEntries(
+  STATUS_OPTIONS.map((option) => [option.value, option.label])
+);
+
+/** source_item.parse_status → 展示文案；未识别的枚举值保留原文 */
+const PARSE_STATUS_LABELS: Record<string, string> = {
+  pending: "待抽取",
+  unparsed: "未抽取",
+  parsed: "已解析",
+  failed: "抽取失败",
+};
+
+/** 收集条目的来源标识：图标底色与缩写 */
+const SOURCE_MARKS: Record<string, { cls: string; label: string; name: string }> = {
+  wechat: { cls: "wx", label: "微", name: "微信公众号" },
+  xhs: { cls: "note", label: "书", name: "小红书" },
+  web: { cls: "web", label: "↗", name: "网页链接" },
+  text: { cls: "note", label: "文", name: "粘贴正文" },
+};
+
+const MONTH_LABELS = [
+  "", "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+/** 直接取 ISO 串的日期部分，不做时区换算——仅日期与带时刻统一按原文展示日 */
+function dateBlockParts(value: string | null | undefined): { day: string; month: string } | null {
+  const match = value?.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return null;
+  const month = MONTH_LABELS[Number(match[2])];
+  return month ? { day: match[3], month } : null;
+}
+
+function sourceTypeLabel(sourceType: string): string {
+  return SOURCE_MARKS[sourceType]?.name ?? "其他来源";
+}
+
+function formatCaptured(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
 
 type DuplicateCandidate = {
   event: EventItem;
@@ -447,45 +499,76 @@ export function App() {
     }
   }
 
+  /** 顶栏"快速收集"：切回收集箱并聚焦链接输入框，不新增弹窗 */
+  function focusComposer() {
+    setActiveView("inbox");
+    window.setTimeout(() => {
+      document.getElementById("composer-input")?.focus();
+    }, 30);
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <CalendarDays size={24} />
-          <span>Planbox</span>
+          <div className="brand-mark">
+            <Radar size={19} />
+          </div>
+          <div>
+            <div className="brand-name">Planbox</div>
+            <div className="brand-caption">OPPORTUNITY INTELLIGENCE</div>
+          </div>
         </div>
-        <nav className="nav">
-          <NavButton active={activeView === "inbox"} onClick={() => setActiveView("inbox")}>
-            <Inbox size={18} />
+        <div className="nav-caption">WORKSPACE</div>
+        <nav className="nav" aria-label="主导航">
+          <NavButton label="Inbox" active={activeView === "inbox"} onClick={() => setActiveView("inbox")} count={items.length}>
+            <Inbox size={17} />
             <span>Inbox</span>
           </NavButton>
-          <NavButton active={activeView === "review"} onClick={() => setActiveView("review")}>
-            <ClipboardList size={18} />
+          <NavButton label="Review" active={activeView === "review"} onClick={() => setActiveView("review")} count={reviewItems.length}>
+            <ClipboardList size={17} />
             <span>Review</span>
           </NavButton>
-          <NavButton
-            active={activeView === "activities"}
-            onClick={() => setActiveView("activities")}
-          >
-            <Search size={18} />
+          <NavButton label="Activities" active={activeView === "activities"} onClick={() => setActiveView("activities")} count={events.length}>
+            <Search size={17} />
             <span>Activities</span>
           </NavButton>
-          <NavButton active={activeView === "brief"} onClick={() => setActiveView("brief")}>
-            <Bell size={18} />
+          <NavButton label="Brief" active={activeView === "brief"} onClick={() => setActiveView("brief")}>
+            <Bell size={17} />
             <span>Brief</span>
           </NavButton>
         </nav>
+        <div className="sidebar-spacer" />
+        <div className="profile">
+          <div className="avatar">P</div>
+          <div>
+            <div className="profile-name">个人工作空间</div>
+            <div className="profile-role">Planbox</div>
+          </div>
+        </div>
       </aside>
 
       <section className="content">
-        <header className="page-header">
+        <div className="topline">
+          <div className="crumb">
+            工作空间　/　<b>{crumbName(activeView)}</b>
+          </div>
+          <div className="top-actions">
+            <button type="button" className="icon-btn" aria-label="刷新" onClick={refreshAll}>
+              <RefreshCw size={16} />
+            </button>
+            <button type="button" onClick={focusComposer}>
+              <span>＋</span> 快速收集
+            </button>
+          </div>
+        </div>
+
+        <header className="page-heading">
           <div>
+            <p className="eyebrow">{pageEyebrow(activeView)}</p>
             <h1>{pageTitle(activeView)}</h1>
             <p>{pageSubtitle(activeView)}</p>
           </div>
-          <button type="button" className="secondary" onClick={refreshAll}>
-            刷新
-          </button>
         </header>
 
         {message ? <p className="notice">{message}</p> : null}
@@ -539,13 +622,241 @@ export function App() {
               </section>
             ) : null}
 
+            <div className="hero-grid">
+              <section className="radar-card">
+                <div className="radar-copy">
+                  <div className="radar-kicker">
+                    <i className="live-dot" /> YOUR OPPORTUNITY RADAR
+                  </div>
+                  <h2>
+                    你的下一次机会，
+                    <br />
+                    可能就在这里。
+                  </h2>
+                  <p>把活动、比赛与行业信息收进来。先看清事实，再决定值不值得投入。</p>
+                  <div className="radar-meta">
+                    <div>
+                      <strong>{pad2(items.length)}</strong>
+                      <span>条待整理线索</span>
+                    </div>
+                    <div>
+                      <strong>{pad2(reviewItems.length)}</strong>
+                      <span>条待人工核对</span>
+                    </div>
+                  </div>
+                  <button type="button" className="radar-cta" onClick={() => setActiveView("activities")}>
+                    探索机会库 <span>↗</span>
+                  </button>
+                </div>
+                <div className="radar-visual" aria-hidden="true">
+                  <div className="radar-sweep" />
+                  <div className="orbit four" />
+                  <div className="orbit three" />
+                  <div className="orbit two" />
+                  <div className="orbit one" />
+                  <div className="radar-core">
+                    <Radar size={20} />
+                  </div>
+                  <i className="radar-point p1" />
+                  <i className="radar-point p2" />
+                  <i className="radar-point p3" />
+                </div>
+              </section>
+
+              <section className="queue-card">
+                <div className="panel-head">
+                  <div>
+                    <h3 className="panel-title">待你确认</h3>
+                    <p className="panel-sub">AI 已整理，关键事实需要你把关</p>
+                  </div>
+                  <span className="status pending">{pad2(reviewItems.length)} 待核对</span>
+                </div>
+                <div className="queue-list">
+                  {reviewItems.length === 0 ? (
+                    <p className="queue-empty">当前没有待核对草稿。新收集的内容抽取后会出现在这里。</p>
+                  ) : (
+                    reviewItems.slice(0, 3).map((item, index) => (
+                      <button
+                        type="button"
+                        className="queue-row"
+                        key={item.extraction.id}
+                        onClick={() => setActiveView("review")}
+                      >
+                        <span className={`queue-icon ${["blue", "orange", "purple"][index % 3]}`}>
+                          <ClipboardList size={15} />
+                        </span>
+                        <span className="queue-main">
+                          <b>{item.extraction.extracted.title || "未命名草稿"}</b>
+                          <span>
+                            {item.extraction.missing_fields.length > 0
+                              ? `待补：${fieldLabel(item.extraction.missing_fields[0])}`
+                              : "关键字段待人工核对"}
+                          </span>
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+                <div className="queue-footer">
+                  <span>确认不是走过场，是质量控制。</span>
+                  <button type="button" className="text-link" onClick={() => setActiveView("review")}>
+                    进入 Review →
+                  </button>
+                </div>
+              </section>
+            </div>
+
+            <div className="stat-strip">
+              <div className="stat">
+                <div className="stat-icon blue">
+                  <Inbox size={15} />
+                </div>
+                <div>
+                  <div className="stat-label">累计收集</div>
+                  <div className="stat-value">{items.length}</div>
+                </div>
+                <span className="stat-foot">链接 / 正文 / 分享</span>
+              </div>
+              <div className="stat">
+                <div className="stat-icon orange">
+                  <ClipboardList size={15} />
+                </div>
+                <div>
+                  <div className="stat-label">待核对草稿</div>
+                  <div className="stat-value">{pad2(reviewItems.length)}</div>
+                </div>
+                <span className="stat-foot">需要人工确认</span>
+              </div>
+              <div className="stat">
+                <div className="stat-icon green">
+                  <Sparkles size={15} />
+                </div>
+                <div>
+                  <div className="stat-label">已确认机会</div>
+                  <div className="stat-value">{events.length}</div>
+                </div>
+                <span className="stat-foot">当前筛选内</span>
+              </div>
+            </div>
+
+            <div className="lower-grid">
+              <section className="panel">
+                <div className="panel-head">
+                  <div>
+                    <h3 className="panel-title">最近收集</h3>
+                    <p className="panel-sub">从链接、正文和分享入口汇总</p>
+                  </div>
+                </div>
+                <div className="source-list feed-list">
+                  {items.length === 0 ? (
+                    <p className="empty">还没有收集内容。先扔一条真实活动进来。</p>
+                  ) : (
+                    items.map((item) => {
+                      const mark = SOURCE_MARKS[item.source_type] ?? {
+                        cls: "web",
+                        label: "↗",
+                        name: "其他来源",
+                      };
+                      return (
+                        <article className="source-row feed-row" key={item.id}>
+                          <div className="source-mark-cell">
+                            <span className={`source-mark ${mark.cls}`}>{mark.label}</span>
+                          </div>
+                          <div className="feed-copy">
+                            <b>{item.title || item.source_url || "未命名活动线索"}</b>
+                            <span>
+                              {sourceTypeLabel(item.source_type)} · {formatCaptured(item.captured_at)}
+                            </span>
+                          </div>
+                          <div className="row-actions">
+                            {item.ingest_state === "needs_content" ? (
+                              <button
+                                type="button"
+                                className="status pending"
+                                onClick={() =>
+                                  setPendingContent({
+                                    id: item.id,
+                                    nextAction:
+                                      "这条还没有正文。请在微信文章页全选复制正文，粘贴到上方补全。",
+                                  })
+                                }
+                              >
+                                待补正文
+                              </button>
+                            ) : (
+                              <span className={`status ${item.parse_status}`}>
+                                {PARSE_STATUS_LABELS[item.parse_status] ?? item.parse_status}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              className="secondary"
+                              disabled={busyId === item.id || item.ingest_state === "needs_content"}
+                              title={
+                                item.ingest_state === "needs_content"
+                                  ? "需要先补全正文"
+                                  : "AI 抽取"
+                              }
+                              onClick={() => extractSource(item.id)}
+                            >
+                              <Sparkles size={15} />
+                              {busyId === item.id ? "抽取中" : "AI 抽取"}
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })
+                  )}
+                </div>
+              </section>
+
+              <section className="panel deadline-panel">
+                <div className="panel-head">
+                  <div>
+                    <h3 className="panel-title">临近节点</h3>
+                    <p className="panel-sub">只展示已知时间，不替你猜截止日</p>
+                  </div>
+                  <span className="section-kicker">NEXT UP</span>
+                </div>
+                <div className="deadline-list">
+                  {upcomingDeadlines(events).map(({ event, at, kind }) => {
+                    const parts = dateBlockParts(at);
+                    return (
+                      <div className="deadline-row" key={event.id}>
+                        <div className="date-block">
+                          <strong>{parts?.day ?? "--"}</strong>
+                          <span>{parts?.month ?? "待核"}</span>
+                        </div>
+                        <div className="deadline-copy">
+                          <b>{event.title}</b>
+                          <span>
+                            {kind === "deadline" ? "报名截止" : "活动开始"} ·{" "}
+                            {formatRelativeDate(at)}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="empty-hint">
+                  时间存在冲突或缺少年份时，会先标记待核对，不会自动排进计划。
+                </div>
+              </section>
+            </div>
+
+            <div className="page-toolbar">
+              <h2>快速收集一条新线索</h2>
+              <span className="section-kicker">CAPTURE FIRST</span>
+            </div>
+
             <form className="composer" onSubmit={handleSubmit}>
               <label>
                 链接
                 <input
+                  id="composer-input"
                   value={sourceUrl}
                   onChange={(event) => setSourceUrl(event.target.value)}
-                  placeholder="https://..."
+                  placeholder="粘贴微信公众号、小红书或网页链接…"
                 />
               </label>
               <label>
@@ -553,118 +864,86 @@ export function App() {
                 <textarea
                   value={rawText}
                   onChange={(event) => setRawText(event.target.value)}
-                  placeholder="粘贴微信推文、小红书笔记或活动介绍..."
+                  placeholder="也可以直接粘贴活动介绍、报名通知或正文…"
                 />
               </label>
               <div className="composer-actions">
                 <button type="button" className="secondary" title="Upload screenshot">
-                  <Upload size={17} />
+                  <Upload size={16} />
                   截图稍后接入
                 </button>
                 <button type="submit" disabled={isSaving || (!rawText && !sourceUrl)}>
-                  {isSaving ? "保存中" : "保存到 Inbox"}
+                  {isSaving ? "保存中" : "收进 Inbox ↗"}
                 </button>
               </div>
+              <p className="collect-hint">
+                原始内容会保留。AI 提取结果进入 Review 后，仍需人工核对关键字段。
+              </p>
             </form>
+          </>
+        ) : null}
 
-            <section className="list-header">
-              <h2>最近收集</h2>
-            </section>
-
-            <section className="source-list">
-              {items.length === 0 ? (
-                <p className="empty">还没有收集内容。先扔一条真实活动进来。</p>
+        {activeView === "review" ? (
+          <>
+            <div className="page-toolbar">
+              <h2>
+                待确认草稿 <span className="toolbar-note">/ {pad2(reviewItems.length)}</span>
+              </h2>
+              <span className="section-kicker">REVIEW QUEUE</span>
+            </div>
+            <section className="review-list">
+              {reviewItems.length === 0 ? (
+                <p className="empty">没有待确认草稿。很好，至少这里暂时不是第二个垃圾桶。</p>
               ) : (
-                items.map((item) => (
-                  <article className="source-row" key={item.id}>
-                    <div>
-                      <h3>{item.title || item.source_url || "未命名活动线索"}</h3>
-                      <p>{item.raw_text || item.source_url}</p>
-                    </div>
-                    <div className="row-actions">
-                      {item.ingest_state === "needs_content" ? (
-                        <button
-                          type="button"
-                          className="status pending"
-                          onClick={() =>
-                            setPendingContent({
-                              id: item.id,
-                              nextAction:
-                                "这条还没有正文。请在微信文章页全选复制正文，粘贴到上方补全。",
-                            })
-                          }
-                        >
-                          待补正文
-                        </button>
-                      ) : (
-                        <span className="status">{item.parse_status}</span>
-                      )}
-                      <button
-                        type="button"
-                        className="secondary"
-                        disabled={busyId === item.id || item.ingest_state === "needs_content"}
-                        title={
-                          item.ingest_state === "needs_content"
-                            ? "需要先补全正文"
-                            : "AI 抽取"
-                        }
-                        onClick={() => extractSource(item.id)}
-                      >
-                        <Sparkles size={16} />
-                        {busyId === item.id ? "抽取中" : "AI 抽取"}
-                      </button>
-                    </div>
-                  </article>
+                reviewItems.map((item) => (
+                  <ReviewCard key={item.extraction.id} item={item} apiBase={API_BASE_URL}
+                    onSaved={async () => {
+                      if (!await loadReviewQueue()) throw new Error("草稿列表读取失败");
+                    }} onConfirm={confirmReview} onReject={rejectReview} />
                 ))
               )}
             </section>
           </>
         ) : null}
 
-        {activeView === "review" ? (
-          <section className="review-list">
-            {reviewItems.length === 0 ? (
-              <p className="empty">没有待确认草稿。很好，至少这里暂时不是第二个垃圾桶。</p>
-            ) : (
-              reviewItems.map((item) => (
-                <ReviewCard key={item.extraction.id} item={item} apiBase={API_BASE_URL}
-                  onSaved={async () => {
-                    if (!await loadReviewQueue()) throw new Error("草稿列表读取失败");
-                  }} onConfirm={confirmReview} onReject={rejectReview} />
-              ))
-            )}
-          </section>
-        ) : null}
-
         {activeView === "activities" ? (
           <>
-            <section className="list-header">
-              <h2>已确认活动</h2>
+            <div className="page-toolbar">
+              <h2>
+                已确认活动 <span className="toolbar-note">{events.length} 条 · 当前筛选内</span>
+              </h2>
               <a className="button-link" href={`${API_BASE_URL}/api/calendar/export.ics`}>
-                <Download size={17} />
+                <Download size={16} />
                 导出待行动日历
               </a>
-            </section>
+            </div>
 
             <section className="filter-bar">
-              <input
-                type="search"
-                placeholder="搜索活动名称、主办方、地点"
-                value={filters.keyword}
-                onChange={(e) => setFilters({ ...filters, keyword: e.target.value })}
-              />
-              <select
-                value={filters.status}
-                onChange={(e) => setFilters({ ...filters, status: e.target.value })}
-              >
+              <div className="search-field">
+                <Search size={14} />
+                <input
+                  type="search"
+                  aria-label="搜索活动"
+                  placeholder="搜索活动名称、主办方、地点…"
+                  value={filters.keyword}
+                  onChange={(e) => setFilters({ ...filters, keyword: e.target.value })}
+                />
+              </div>
+              <div className="filter-chips">
                 {STATUS_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
+                  <button
+                    type="button"
+                    key={option.value}
+                    className={`filter-chip ${filters.status === option.value ? "active" : ""}`}
+                    onClick={() => setFilters({ ...filters, status: option.value })}
+                  >
                     {option.label}
-                  </option>
+                  </button>
                 ))}
-              </select>
+              </div>
               <select
                 value={filters.deadlineWithinDays}
+                aria-label="截止时间筛选"
                 onChange={(e) =>
                   setFilters({ ...filters, deadlineWithinDays: Number(e.target.value) })
                 }
@@ -680,53 +959,74 @@ export function App() {
               {events.length === 0 ? (
                 <p className="empty">还没有正式活动。先从 Review 里确认一个。</p>
               ) : (
-                events.map((event) => (
-                  <article className="source-row" key={event.id}>
-                    <div>
-                      <h3>{event.title}</h3>
-                      <p>
-                        {[event.registration_deadline_at, event.event_start_at, event.location]
-                          .filter(Boolean)
-                          .join(" · ") || "时间地点待补充"}
-                      </p>
-                      <div className="inline-actions">
-                        <select
-                          className="status-select"
-                          value={event.status}
-                          disabled={busyId === event.id}
-                          onChange={(e) => updateEventStatus(event.id, e.target.value)}
-                        >
-                          {STATUS_OPTIONS.filter((o) => o.value).map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          type="button"
-                          className="link-button"
-                          onClick={() => checkDuplicates(event.id)}
-                        >
-                          检查重复
-                        </button>
+                events.map((event) => {
+                  const dateParts = dateBlockParts(event.event_start_at ?? event.registration_deadline_at);
+                  return (
+                    <article className="source-row" key={event.id}>
+                      <div className="source-date">
+                        <b>{dateParts?.day ?? "--"}</b>
+                        <span>{dateParts?.month ?? "待核"}</span>
                       </div>
-                      {event.time_issues?.length ? (
-                        <p className="missing">时间待核对：{timeReviewMessage(event.time_issues)}</p>
-                      ) : null}
-                      <ActivityDetails eventId={event.id} apiBase={API_BASE_URL} onUpdated={loadEvents} />
-                    </div>
-                    <div className="row-actions">
-                      <span className="status">{event.status}</span>
-                      <a
-                        className="button-link secondary"
-                        href={`${API_BASE_URL}/api/calendar/events/${event.id}.ics`}
-                      >
-                        <Download size={16} />
-                        ICS
-                      </a>
-                    </div>
-                  </article>
-                ))
+                      <div>
+                        <h3>{event.title}</h3>
+                        <p>
+                          {[event.registration_deadline_at, event.event_start_at, event.location]
+                            .filter(Boolean)
+                            .join(" · ") || "时间地点待补充"}
+                        </p>
+                        {event.event_type || event.time_issues?.length || !event.registration_deadline_at ? (
+                          <div className="activity-tags">
+                            {event.event_type ? <span className="tag">{event.event_type}</span> : null}
+                            {event.time_issues?.length ? (
+                              <span className="tag">时间待核对</span>
+                            ) : null}
+                            {!event.registration_deadline_at ? (
+                              <span className="tag">截止未知</span>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        {event.time_issues?.length ? (
+                          <p className="missing">时间待核对：{timeReviewMessage(event.time_issues)}</p>
+                        ) : null}
+                        <div className="inline-actions">
+                          <select
+                            className="status-select"
+                            aria-label="修改活动状态"
+                            value={event.status}
+                            disabled={busyId === event.id}
+                            onChange={(e) => updateEventStatus(event.id, e.target.value)}
+                          >
+                            {STATUS_OPTIONS.filter((o) => o.value).map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            className="link-button"
+                            onClick={() => checkDuplicates(event.id)}
+                          >
+                            检查重复
+                          </button>
+                        </div>
+                        <ActivityDetails eventId={event.id} apiBase={API_BASE_URL} onUpdated={loadEvents} />
+                      </div>
+                      <div className="row-actions">
+                        <span className={`status ${event.status}`}>
+                          {STATUS_LABELS[event.status] ?? event.status}
+                        </span>
+                        <a
+                          className="button-link secondary"
+                          href={`${API_BASE_URL}/api/calendar/events/${event.id}.ics`}
+                        >
+                          <Download size={15} />
+                          ICS
+                        </a>
+                      </div>
+                    </article>
+                  );
+                })
               )}
             </section>
 
@@ -760,48 +1060,84 @@ export function App() {
   );
 }
 
+/** 已知且未过期的时间节点，按时间升序取前 4 条；needs_review/unknown 不进列表 */
+type UpcomingNode = { event: EventItem; at: string; kind: "deadline" | "start" };
+
+function upcomingDeadlines(events: EventItem[]): UpcomingNode[] {
+  return events
+    .flatMap<UpcomingNode>((event) => {
+      if (event.registration_deadline_at) {
+        return [{ event, at: event.registration_deadline_at, kind: "deadline" as const }];
+      }
+      if (event.event_start_at) {
+        return [{ event, at: event.event_start_at, kind: "start" as const }];
+      }
+      return [];
+    })
+    .filter(({ at }) => {
+      const status = deadlineStatus(at);
+      return status !== "expired" && status !== "needs_review" && status !== "unknown";
+    })
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .slice(0, 4);
+}
+
 function NavButton({
   active,
   onClick,
+  label,
+  count,
   children,
 }: {
   active: boolean;
   onClick: () => void;
+  /** aria-label 与可见文案一致；数量徽章对辅助技术隐藏，避免读成按钮名的一部分 */
+  label: string;
+  count?: number;
   children: ReactNode;
 }) {
   return (
-    <button className={`nav-item ${active ? "active" : ""}`} type="button" onClick={onClick}>
+    <button className={`nav-item ${active ? "active" : ""}`} type="button" aria-label={label} onClick={onClick}>
       {children}
+      {count && count > 0 ? (
+        <span className="nav-count" aria-hidden="true">
+          {pad2(count)}
+        </span>
+      ) : null}
     </button>
   );
 }
 
-function Field({ label, value }: { label: string; value?: string | null }) {
-  return (
-    <>
-      <dt>{label}</dt>
-      <dd>{value || "待确认"}</dd>
-    </>
-  );
+function crumbName(view: View) {
+  if (view === "review") return "待核对";
+  if (view === "activities") return "机会库";
+  if (view === "brief") return "机会简报";
+  return "收集箱";
+}
+
+function pageEyebrow(view: View) {
+  if (view === "review") return "HUMAN IN THE LOOP";
+  if (view === "activities") return "YOUR OPPORTUNITY LIBRARY";
+  if (view === "brief") return "A CLEARER VIEW OF WHAT'S NEXT";
+  const now = new Date();
+  const weekday = new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(now);
+  const day = new Intl.DateTimeFormat("en-US", { day: "2-digit" }).format(now);
+  const month = new Intl.DateTimeFormat("en-US", { month: "short" }).format(now);
+  return `${weekday} · ${day} ${month} ${now.getFullYear()}`.toUpperCase();
 }
 
 function pageTitle(view: View) {
-  if (view === "review") return "待确认队列";
-  if (view === "activities") return "活动机会池";
-  if (view === "brief") return "每日简报";
-  return "活动收件箱";
+  if (view === "review") return "先核对事实，再做决定。";
+  if (view === "activities") return "值得关注的，不止是收藏。";
+  if (view === "brief") return "把注意力留给重要的事。";
+  return "把机会，变成下一步。";
 }
 
 function pageSubtitle(view: View) {
-  if (view === "review") return "AI 先给草稿，你确认以后才入库。";
-  if (view === "activities") return "这里只放已经确认过、可以继续推进的活动。";
-  if (view === "brief") return "减少每天打开工具后的判断成本。";
-  return "先把原文和链接收进来，下一步再做 AI 提取。";
-}
-
-function formatScore(score?: number | null) {
-  if (score === null || score === undefined) return null;
-  return `${Math.round(score * 100)}%`;
+  if (view === "review") return "AI 帮你整理信息，最终确认权仍然在你手里。";
+  if (view === "activities") return "集中查看已确认的活动，并持续更新参与状态。";
+  if (view === "brief") return "汇总近期机会、关键节点与尚未解决的信息。";
+  return "散落在各处的信息，值得被认真整理。";
 }
 
 function BriefView({
@@ -821,80 +1157,92 @@ function BriefView({
 
   const expiredEvents = events.filter((e) => deadlineStatus(e.registration_deadline_at, now) === "expired");
 
+  type Step = { key: string; title: string; meta: string; badge: string; badgeStatus: string };
+  const steps: Step[] = [
+    ...urgentEvents.slice(0, 3).map<Step>((e) => ({
+      key: `urgent-${e.id}`,
+      title: `报名截止临近：${e.title}`,
+      meta: `截止 ${formatRelativeDate(e.registration_deadline_at!)}`,
+      badge: "紧急",
+      badgeStatus: "failed",
+    })),
+    ...reviewItems.slice(0, 3).map<Step>((item) => ({
+      key: `review-${item.extraction.id}`,
+      title: item.extraction.extracted.title || "未命名草稿",
+      meta: "草稿待人工确认后入库",
+      badge: "待核对",
+      badgeStatus: "pending",
+    })),
+    ...missingInfoEvents.slice(0, 2).map<Step>((e) => ({
+      key: `missing-${e.id}`,
+      title: `补充「${e.title}」的关键信息`,
+      meta: e.time_issues?.length ? "时间待核对" : "待补充关键信息",
+      badge: "待补全",
+      badgeStatus: "pending",
+    })),
+    ...expiredEvents.slice(0, 2).map<Step>((e) => ({
+      key: `expired-${e.id}`,
+      title: e.title,
+      meta: "报名已截止，可更新状态或放弃",
+      badge: "已过期",
+      badgeStatus: "unparsed",
+    })),
+  ];
+
   return (
     <section className="brief-view">
-      {urgentEvents.length > 0 && (
-        <BriefSection icon={<AlertTriangle size={18} />} title="3天内截止" variant="urgent">
-          {urgentEvents.map((e) => (
-            <div key={e.id} className="brief-item">
-              <span className="brief-title">{e.title}</span>
-              <span className="brief-meta">截止 {formatRelativeDate(e.registration_deadline_at!)}</span>
-            </div>
-          ))}
-        </BriefSection>
-      )}
+      <div className="brief-feature">
+        <div className="radar-kicker">
+          <i className="live-dot" /> THIS WEEK AT A GLANCE
+        </div>
+        <h2>本周机会简报</h2>
+        <p>先处理事实不完整的线索，再决定是否投入时间。不要让收藏数量冒充进展。</p>
+        <div className="brief-number">
+          {pad2(reviewItems.length)} <span>条信息需要你确认</span>
+        </div>
+      </div>
 
-      {reviewItems.length > 0 && (
-        <BriefSection icon={<ClipboardList size={18} />} title="待确认草稿" variant="action">
-          {reviewItems.map((item) => (
-            <div key={item.extraction.id} className="brief-item">
-              <span className="brief-title">{item.extraction.extracted.title}</span>
-              <span className="brief-meta">置信度 {formatScore(item.extraction.confidence)}</span>
-            </div>
-          ))}
-        </BriefSection>
-      )}
+      <div className="brief-side">
+        <div className="brief-mini">
+          <b>{pad2(urgentEvents.length)}</b>
+          <span>3 天内截止</span>
+        </div>
+        <div className="brief-mini">
+          <b>{pad2(missingInfoEvents.length)}</b>
+          <span>信息待核对</span>
+        </div>
+      </div>
 
-      {missingInfoEvents.length > 0 && (
-        <BriefSection icon={<Star size={18} />} title="信息待核对" variant="info">
-          {missingInfoEvents.map((e) => (
-            <div key={e.id} className="brief-item">
-              <span className="brief-title">{e.title}</span>
-              <span className="brief-meta">{e.time_issues?.length ? "时间待核对" : "待补充关键信息"}</span>
-            </div>
-          ))}
-        </BriefSection>
-      )}
+      <div className="page-toolbar">
+        <h2>下一步建议</h2>
+        <span className="section-kicker">NEXT ACTIONS</span>
+      </div>
 
-      {expiredEvents.length > 0 && (
-        <BriefSection icon={<Clock size={18} />} title="已过期" variant="expired">
-          {expiredEvents.map((e) => (
-            <div key={e.id} className="brief-item">
-              <span className="brief-title">{e.title}</span>
-              <span className="brief-meta">已截止</span>
-            </div>
-          ))}
-        </BriefSection>
-      )}
+      <section className="panel">
+        <div className="brief-list">
+          {steps.length === 0 ? (
+            <p className="empty">今日无事，一切尽在掌握。</p>
+          ) : (
+            steps.map((step, index) => (
+              <div className="brief-item" key={step.key}>
+                <div className="date-block">
+                  <strong>{pad2(index + 1)}</strong>
+                  <span>STEP</span>
+                </div>
+                <div className="deadline-copy">
+                  <b>{step.title}</b>
+                  <span>{step.meta}</span>
+                </div>
+                <span className={`status ${step.badgeStatus}`}>{step.badge}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
 
-      {urgentEvents.length === 0 &&
-        reviewItems.length === 0 &&
-        missingInfoEvents.length === 0 &&
-        expiredEvents.length === 0 && (
-          <p className="empty">今日无事，一切尽在掌握。</p>
-        )}
+      <div className="empty-hint">
+        按目标评估机会、拆分准备任务并生成具体时段计划，属于下一阶段功能；此处只汇总已确认的事实。
+      </div>
     </section>
-  );
-}
-
-function BriefSection({
-  icon,
-  title,
-  variant,
-  children,
-}: {
-  icon: ReactNode;
-  title: string;
-  variant: "urgent" | "action" | "info" | "expired";
-  children: ReactNode;
-}) {
-  return (
-    <article className={`brief-section ${variant}`}>
-      <h3>
-        {icon}
-        {title}
-      </h3>
-      <div className="brief-list">{children}</div>
-    </article>
   );
 }
