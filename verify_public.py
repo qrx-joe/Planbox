@@ -68,7 +68,8 @@ check("HTTPS 生效", BASE.startswith("https://"))
 check("返回环境信息", isinstance(health, dict) and "env" in health)
 env = (health or {}).get("env", {}) if isinstance(health, dict) else {}
 check("PORT 环境变量已注入", env.get("port") == "8000", str(env.get("port")))
-check("数据目录已重定位到容器内", env.get("data_dir", "").startswith("/workspace"), str(env.get("data_dir")))
+check("数据目录已重定位到容器内", env.get("data_dir", "").startswith("/workspace"),
+      str(env.get("data_dir")))
 check("LLM provider 为 fake（无密钥可用）", env.get("llm_provider") == "fake")
 
 print("\n[2] 跨域行为")
@@ -91,14 +92,16 @@ text = (
 code, item, _ = call(
     "POST", "/api/source-items", {"source_type": "text", "raw_text": text}
 )
-check("创建 source item", code == 201 and isinstance(item, dict) and "id" in item, f"code={code} {str(item)[:120]}")
+check("创建 source item", code == 201 and isinstance(item, dict) and "id" in item,
+      f"code={code} {str(item)[:120]}")
 item_id = item.get("id") if isinstance(item, dict) else None
 
 code, fetched_item, _ = call("GET", f"/api/source-items/{item_id}")
 check("跨请求可读回（写入已落盘）", code == 200 and fetched_item.get("id") == item_id)
 check(
     "正文完整保存",
-    isinstance(fetched_item, dict) and (fetched_item.get("raw_text") or "").startswith("公网验证活动"),
+    isinstance(fetched_item, dict)
+    and (fetched_item.get("raw_text") or "").startswith("公网验证活动"),
 )
 check(
     "ingest_state 默认为 ready",
@@ -108,7 +111,8 @@ check(
 
 print("\n[4] 抽取与确认入库")
 code, ext, _ = call("POST", f"/api/source-items/{item_id}/extract")
-check("AI 抽取可用（fake provider）", code == 200 and isinstance(ext, dict) and "id" in ext, f"code={code}")
+check("AI 抽取可用（fake provider）", code == 200 and isinstance(ext, dict) and "id" in ext,
+      f"code={code}")
 ext_id = ext.get("id") if isinstance(ext, dict) else None
 
 code, evt, _ = call(
@@ -139,7 +143,8 @@ code, evt, _ = call(
         },
     },
 )
-check("确认入库", code == 200 and isinstance(evt, dict) and "id" in evt, f"code={code} {str(evt)[:150]}")
+check("确认入库", code == 200 and isinstance(evt, dict) and "id" in evt,
+      f"code={code} {str(evt)[:150]}")
 evt_id = evt.get("id") if isinstance(evt, dict) else None
 
 print("\n[5] 证据可溯源（公网链路一致性）")
@@ -163,7 +168,8 @@ check("状态筛选", code == 200 and isinstance(filtered, list))
 code, kw, _ = call(
     "GET", "/api/events?keyword=%E4%BA%91%E5%8E%9F%E7%94%9F&paginated=false"
 )
-check("中文关键词搜索", code == 200 and isinstance(kw, list) and len(kw) > 0, f"命中 {len(kw) if isinstance(kw, list) else kw}")
+check("中文关键词搜索", code == 200 and isinstance(kw, list) and len(kw) > 0,
+      f"命中 {len(kw) if isinstance(kw, list) else kw}")
 
 code, upd, _ = call("PATCH", f"/api/events/{evt_id}/status", {"status": "applied"})
 check("状态流转 interested→applied", code == 200 and upd.get("status") == "applied")
@@ -192,7 +198,8 @@ check(
     isinstance(intake, dict)
     and intake.get("fetch_attempted") is True
     and intake.get("fetch_succeeded") is False,
-    f"attempted={intake.get('fetch_attempted') if isinstance(intake, dict) else None} ok={intake.get('fetch_succeeded') if isinstance(intake, dict) else None}",
+    f"attempted={intake.get('fetch_attempted') if isinstance(intake, dict) else None} "
+    f"ok={intake.get('fetch_succeeded') if isinstance(intake, dict) else None}",
 )
 check(
     "返回 needs_content 而非错误",
@@ -209,13 +216,15 @@ long_body = (
 code, done, _ = call(
     "POST", f"/api/share/{share_id}/complete", {"raw_text": long_body, "auto_extract": True}
 )
-check("粘贴补全成功", code == 200 and done.get("state") == "ready", f"code={code} {str(done)[:120]}")
+check("粘贴补全成功", code == 200 and done.get("state") == "ready",
+      f"code={code} {str(done)[:120]}")
 check("触发 AI 抽取", isinstance(done, dict) and done.get("extraction_started") is True)
 
 code, again, _ = call(
     "POST", f"/api/share/{share_id}/complete", {"raw_text": long_body, "auto_extract": True}
 )
-check("幂等：重复提交不重复抽取", isinstance(again, dict) and again.get("extraction_started") is False)
+check("幂等：重复提交不重复抽取",
+      isinstance(again, dict) and again.get("extraction_started") is False)
 
 print("\n[8] 旧 fetch 接口的降级")
 code, fetched, _ = call(
@@ -266,7 +275,8 @@ code, asset, _ = call(
     raw_body=small_body,
     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
 )
-check("正常大小上传成功", code == 201 and isinstance(asset, dict), f"实际 {code} {str(asset)[:120]}")
+check("正常大小上传成功", code == 201 and isinstance(asset, dict),
+      f"实际 {code} {str(asset)[:120]}")
 
 print("\n[11] 错误处理")
 code, _, _ = call("GET", "/api/events/does-not-exist")

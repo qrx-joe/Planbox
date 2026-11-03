@@ -22,7 +22,9 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
         "event_type": {
             "type": "string",
             "description": "活动类型",
-            "enum": ["hackathon", "competition", "salon", "bootcamp", "conference", "workshop", "other"],
+            "enum": [
+                "hackathon", "competition", "salon", "bootcamp", "conference", "workshop", "other"],
+
         },
         "organizer": {"type": "string", "description": "主办方名称"},
         "registration_url": {"type": "string", "description": "报名链接"},
@@ -46,7 +48,8 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
         "event_end_at": {
             "type": "string", "description": "活动结束日期/带时区时刻，无则 null",
         },
-        "location": {"type": "string", "description": "活动地点（城市名），线上活动设为 '线上'，无则 null"},
+        "location": {"type": "string",
+                     "description": "活动地点（城市名），线上活动设为 '线上'，无则 null"},
         "is_online": {"type": "boolean", "description": "是否线上活动，不确定则 null"},
         "schedule": {
             "type": "array",
@@ -84,7 +87,8 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
 }
 
 
-SYSTEM_PROMPT = """你是一个活动信息结构化抽取专家。用户会提供一段活动文本（可能来自微信推文、小红书笔记、活动行、掘金等平台），你需要从中抽取结构化的活动信息。
+SYSTEM_PROMPT = """你是一个活动信息结构化抽取专家。用户会提供一段活动文本
+（可能来自微信推文、小红书笔记、活动行、掘金等平台），你需要从中抽取结构化的活动信息。
 
 你必须严格只输出一个 JSON 对象，不要有任何其他文字、markdown 代码块标记或解释。
 

@@ -216,12 +216,17 @@ class WechatArticleFetcher:
         html = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
 
         # 尝试找到 id="js_content" 的元素
-        content_match = re.search(r'id="js_content"[^>]*>(.*?)(?=<div|$)', html, re.DOTALL | re.IGNORECASE)
+        content_match = re.search(
+            r'id="js_content"[^>]*>(.*?)(?=<div|$)', html, re.DOTALL | re.IGNORECASE
+        )
         if content_match:
             return self._clean_html(content_match.group(1))
 
         # 尝试找到 class="rich_media_content" 的元素
-        content_match = re.search(r'class="rich_media_content"[^>]*>(.*?)(?=<div|$)', html, re.DOTALL | re.IGNORECASE)
+        content_match = re.search(
+            r'class="rich_media_content"[^>]*>(.*?)(?=<div|$)',
+            html, re.DOTALL | re.IGNORECASE,
+        )
         if content_match:
             return self._clean_html(content_match.group(1))
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from backend.app.core.ids import new_id
 from backend.app.core.time import now_iso
 from backend.app.repositories.opportunity_score_repository import OpportunityScoreRepository
-from backend.app.schemas.opportunity_score import OpportunityScoreCreate, OpportunityScoreRead
+from backend.app.schemas.opportunity_score import OpportunityScoreRead
 
 
 class ScoringService:

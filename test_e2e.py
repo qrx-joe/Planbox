@@ -255,7 +255,8 @@ code, arr = call("GET", "/api/events?paginated=false")
 check("paginated=false 返回数组", code == 200 and isinstance(arr, list))
 
 code, r = call("GET", "/api/events?status=interested&paginated=false")
-check("筛选 interested 得 2 条", code == 200 and len(r) == 2, f"实际 {len(r) if isinstance(r, list) else r}")
+check("筛选 interested 得 2 条", code == 200 and len(r) == 2,
+      f"实际 {len(r) if isinstance(r, list) else r}")
 
 code, r = call("GET", "/api/events?status=rejected&paginated=false")
 check("筛选 rejected 得 1 条", code == 200 and len(r) == 1)
@@ -264,7 +265,8 @@ code, r = call("GET", "/api/events?status=interested&status=applied&paginated=fa
 check("多状态组合筛选", code == 200 and len(r) == 2, f"实际 {len(r) if isinstance(r, list) else r}")
 
 code, r = call("GET", "/api/events?keyword=%E9%BB%91%E5%AE%A2%E6%9D%BE&paginated=false")
-check("关键词搜索得 2 条", code == 200 and len(r) == 2, f"实际 {len(r) if isinstance(r, list) else r}")
+check("关键词搜索得 2 条", code == 200 and len(r) == 2,
+      f"实际 {len(r) if isinstance(r, list) else r}")
 
 code, r = call("GET", "/api/events?keyword=OpenAI&paginated=false")
 check("按主办方搜索得 2 条", code == 200 and len(r) == 2)
@@ -283,7 +285,8 @@ code, r = call(
     "/api/events?deadline_after=2026-01-01T00%3A00%3A00%2B08%3A00"
     "&deadline_before=2027-01-01T00%3A00%3A00%2B08%3A00&paginated=false",
 )
-check("按截止区间筛选得 1 条", code == 200 and len(r) == 1, f"实际 {len(r) if isinstance(r, list) else r}")
+check("按截止区间筛选得 1 条", code == 200 and len(r) == 1,
+      f"实际 {len(r) if isinstance(r, list) else r}")
 
 code, p = call("GET", "/api/events?limit=2&offset=0")
 check("分页 limit=2", code == 200 and len(p["items"]) == 2)
@@ -296,7 +299,8 @@ code, r = call("GET", "/api/events?sort=created_at&order=desc&paginated=false")
 check("倒序排序可执行", code == 200 and len(r) == 3)
 
 code, r = call("GET", "/api/events?has_missing_fields=true&paginated=false")
-check("筛选信息缺失得 1 条", code == 200 and len(r) == 1, f"实际 {len(r) if isinstance(r, list) else r}")
+check("筛选信息缺失得 1 条", code == 200 and len(r) == 1,
+      f"实际 {len(r) if isinstance(r, list) else r}")
 
 print("\n[5] 状态流转")
 code, r = call("PATCH", f"/api/events/{evt_a['id']}/status", {"status": "applied"})
@@ -397,7 +401,8 @@ code, _ = call("GET", "/api/review-queue/nonexistent/duplicates")
 check("预检不存在的草稿返回 404", code == 404)
 
 print("\n[8] 合并")
-code, merged = call("POST", "/api/events/merge", {"target_id": evt_a["id"], "source_id": evt_b["id"]})
+code, merged = call("POST", "/api/events/merge",
+                    {"target_id": evt_a["id"], "source_id": evt_b["id"]})
 check("合并接口可调用", code == 200, f"code={code} {str(merged)[:150]}")
 if code == 200:
     filled = merged["filled_fields"]
@@ -441,7 +446,8 @@ code, _ = call("DELETE", f"/api/events/{evt_c['id']}")
 check("重复删除 404", code == 404)
 
 code, ics = call("GET", "/api/calendar/export.ics")
-check("ICS 导出正常", code == 200 and isinstance(ics, str) and "BEGIN:VCALENDAR" in ics, f"code={code}")
+check("ICS 导出正常", code == 200 and isinstance(ics, str) and "BEGIN:VCALENDAR" in ics,
+      f"code={code}")
 
 code, one_ics = call("GET", f"/api/calendar/events/{evt_a['id']}.ics")
 check("单活动 ICS 导出", code == 200 and isinstance(one_ics, str) and "BEGIN:VCALENDAR" in one_ics)
@@ -563,7 +569,9 @@ code, q_intake = call(
         "query": "id=9&url=https%3A%2F%2Fmp.weixin.qq.com%2Fs%2Fhiddenurl999",
     },
 )
-check("query 中的文章链接被识别", isinstance(q_intake, dict) and q_intake.get("is_wechat_article") is True, str(q_intake)[:150])
+check("query 中的文章链接被识别",
+      isinstance(q_intake, dict) and q_intake.get("is_wechat_article") is True,
+      str(q_intake)[:150])
 check(
     "解出真实链接",
     isinstance(q_intake, dict)
@@ -586,7 +594,8 @@ code, ready = call(
         "summary": long_text,
     },
 )
-check("正文充足时直接 ready", isinstance(ready, dict) and ready.get("state") == "ready", str(ready)[:150])
+check("正文充足时直接 ready",
+      isinstance(ready, dict) and ready.get("state") == "ready", str(ready)[:150])
 check("直接触发抽取", isinstance(ready, dict) and ready.get("extraction_started") is True)
 
 # 12.11 旧的 fetch 接口降级而非报错

@@ -19,7 +19,9 @@ class UserPreferenceService:
                 "interested_topics": payload.interested_topics,
                 "blocked_topics": payload.blocked_topics,
                 "preferred_locations": payload.preferred_locations,
-                "online_only": int(payload.online_only) if payload.online_only is not None else None,
+                "online_only": (
+                    int(payload.online_only) if payload.online_only is not None else None
+                ),
                 "available_time": payload.available_time,
                 "created_at": timestamp,
                 "updated_at": timestamp,
@@ -31,7 +33,9 @@ class UserPreferenceService:
         row = self.repository.get_latest()
         return self._to_read(row) if row else None
 
-    def update(self, preference_id: str, payload: UserPreferenceCreate) -> UserPreferenceRead | None:
+    def update(
+        self, preference_id: str, payload: UserPreferenceCreate,
+    ) -> UserPreferenceRead | None:
         row = self.repository.get(preference_id)
         if row is None:
             return None
