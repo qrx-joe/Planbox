@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  backend:
+    name: 后端 lint 与定向回归
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: 安装锁定依赖
+        run: uv sync --locked
+      - name: Lint（Ruff 全仓）
+        run: uv run --locked python -m ruff check .
+      # 显式列出定向回归文件：test_e2e.py 在模块顶层发起 HTTP 并清库，
+      # 不能当普通 pytest 用例收集（见 docs/task/to-do.md T-007 边界）。
+      - name: 后端定向回归（8 个文件）
+        run: >
+          uv run --locked python -m pytest
+          tests/test_t001_ingest.py
+          tests/test_t002_time.py
+          tests/test_t003_evidence.py
+          tests/test_t003_corrections.py
+          tests/test_t003_review.py
+          tests/test_t004_extraction.py
+          tests/test_t005_merge_atomic.py
+          tests/test_t009_xiaohongshu.py
+          -q --tb=short
+
+  frontend:
+    name: 前端构建与单测
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # 与本地开发一致；node --test 直接运行 .ts 单测依赖该版本的类型剥离
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 安装锁定依赖
+        run: npm --prefix frontend ci
+      - name: 类型检查与构建
+        run: npm --prefix frontend run build
+      # 浏览器回归依赖本机 Chrome 与本地服务编排，不进 CI；
+      # 此处只跑无外部依赖的纯函数与小程序逻辑单测。
+      - name: 前端纯函数与小程序单测
+        run: >
+          node --test
+          tests/activity-details.test.cjs
+          tests/time-ui.test.cjs
+          tests/link-rules.test.cjs
+          tests/miniprogram.test.cjs
