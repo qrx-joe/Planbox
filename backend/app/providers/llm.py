@@ -147,6 +147,8 @@ class OpenAIProvider(BaseLLMProvider):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
+        # 最近一次调用的用量，供评估脚本观测；不影响抽取行为
+        self.last_usage: dict[str, int] | None = None
 
     async def extract_event(self, text: str, url: str | None = None) -> ExtractedEventDraft:
         url_block = f"来源链接：{url}" if url else ""
@@ -179,6 +181,7 @@ class OpenAIProvider(BaseLLMProvider):
             response.raise_for_status()
             data = response.json()
 
+        self.last_usage = data.get("usage") or None
         content = data["choices"][0]["message"]["content"]
         # 清理可能的 markdown 代码块
         content = content.strip()

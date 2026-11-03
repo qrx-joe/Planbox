@@ -16,6 +16,7 @@ frontend/*.tsbuildinfo
 
 .env
 .env.*
+!.env.example
 .testdata/
 .workbuddy/
 .wbapp_*.genie

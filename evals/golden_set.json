@@ -1,0 +1,127 @@
+{
+  "meta": {
+    "purpose": "抽取质量 Golden Set：真实活动通知正文 + 合成边界样本。标注由人工依据原文核对得出，不含任何模型输出。",
+    "notes": [
+      "时间纪律遵循 T-002 契约：缺年/相对时间不补全，保留原片段或 null；不补默认时刻或时长。",
+      "mode 含义：date=日期部分等价；contains=包含全部关键词；contains_any=包含任一；nullable=原文无依据时 null 才合格；nullable_or_contains=null 或包含关键词均可；time_discipline=必须 null 或保留原片段，输出完整日期记违规；observe=只记录不判分。"
+    ]
+  },
+  "cases": [
+    {
+      "id": "r1-xmu-postdoc",
+      "kind": "real",
+      "text_file": "samples/r1-xmu-postdoc.txt",
+      "url": "https://postdoctor.xmu.edu.cn/info/1033/4316.htm",
+      "expected": {
+        "title": {"mode": "contains", "accept": ["博创八闽"]},
+        "registration_deadline_at": {"mode": "date", "accept": ["2026-05-17"]},
+        "event_start_at": {"mode": "nullable_or_contains", "accept": ["5"]},
+        "event_end_at": {"mode": "nullable_or_contains", "accept": ["9"]},
+        "location": {"mode": "contains", "accept": ["福建"]},
+        "is_online": {"mode": "exact", "accept": [false]},
+        "organizer": {"mode": "nullable_or_contains", "accept": ["博士后"]},
+        "audience": {"mode": "contains_any", "accept": ["博士后", "博士"]},
+        "registration_url": {"mode": "contains", "accept": ["fujianpostdoctor"]},
+        "fee": {"mode": "nullable"}
+      }
+    },
+    {
+      "id": "r2-sioc-forum",
+      "kind": "real",
+      "text_file": "samples/r2-sioc-forum.txt",
+      "url": "https://sioc.cas.cn/hzjl/gjhy/202610/t20261016_8293159.html",
+      "expected": {
+        "title": {"mode": "contains", "accept": ["药物化学", "论坛"]},
+        "registration_deadline_at": {"mode": "date", "accept": ["2026-10-30"]},
+        "event_start_at": {"mode": "date", "accept": ["2026-11-08"]},
+        "event_end_at": {"mode": "date", "accept": ["2026-11-10"]},
+        "location": {"mode": "contains", "accept": ["上海"]},
+        "is_online": {"mode": "exact", "accept": [false]},
+        "organizer": {"mode": "contains", "accept": ["上海有机化学研究所"]},
+        "audience": {"mode": "nullable_or_contains", "accept": ["科研"]},
+        "registration_url": {"mode": "nullable"},
+        "fee": {"mode": "nullable"}
+      }
+    },
+    {
+      "id": "r3-shenzhen-program",
+      "kind": "real",
+      "text_file": "samples/r3-shenzhen-program.txt",
+      "url": "https://yz.uestc.edu.cn/info/1004/5944.htm",
+      "expected": {
+        "title": {"mode": "contains", "accept": ["深瞳计划"]},
+        "registration_deadline_at": {"mode": "date", "accept": ["2026-09-23"]},
+        "event_start_at": {"mode": "date", "accept": ["2026-10-12"]},
+        "event_end_at": {"mode": "date", "accept": ["2026-11-06"]},
+        "location": {"mode": "contains", "accept": ["深圳"]},
+        "is_online": {"mode": "exact", "accept": [false]},
+        "audience": {"mode": "contains_any", "accept": ["硕士", "本科"]},
+        "registration_url": {"mode": "contains", "accept": ["sis.slai.edu.cn"]},
+        "fee": {"mode": "nullable"}
+      }
+    },
+    {
+      "id": "s1-missing-year",
+      "kind": "synthetic",
+      "text": "2026春季黑客松报名开启！报名截止 3 月 15 日，地点北京，线下举行。主办方：示例科技。",
+      "expected": {
+        "title": {"mode": "contains", "accept": ["黑客松"]},
+        "registration_deadline_at": {"mode": "time_discipline", "accept_fragments": ["3 月 15 日", "3月15日"]},
+        "location": {"mode": "contains", "accept": ["北京"]},
+        "organizer": {"mode": "contains", "accept": ["示例科技"]}
+      }
+    },
+    {
+      "id": "s2-relative-date",
+      "kind": "synthetic",
+      "text": "本周五晚 8 点，线上分享会，主题：Agent 工程实践经验。欢迎感兴趣的同学参加。",
+      "expected": {
+        "title": {"mode": "contains_any", "accept": ["分享会", "Agent"]},
+        "registration_deadline_at": {"mode": "time_discipline", "accept_fragments": ["周五", "本周五"]},
+        "is_online": {"mode": "exact", "accept": [true]}
+      }
+    },
+    {
+      "id": "s3-no-event",
+      "kind": "synthetic",
+      "text": "今天天气不错，我去公园散步，顺便买了一杯咖啡，坐在长椅上看了一会儿书。",
+      "expected": {
+        "title": {"mode": "observe", "note": "无活动文本：期望不编造活动信息（title 空或如实描述内容），记录行为不判分"}
+      }
+    },
+    {
+      "id": "s4-multi-event",
+      "kind": "synthetic",
+      "text": "两场活动预告：A「智能体创新赛」报名截止 5 月 1 日；B「产品沙龙」将于 6 月 2 日线上举行，免费参加。",
+      "expected": {
+        "title": {"mode": "observe", "note": "多活动文本：当前 schema 为单活动，记录模型取舍行为不判分"}
+      }
+    },
+    {
+      "id": "s5-online-webinar",
+      "kind": "synthetic",
+      "text": "AI 产品月度线上直播定于 2026-12-05 19:00（UTC+8）开始，时长 90 分钟，免费参加，通过 Zoom 链接报名。",
+      "expected": {
+        "title": {"mode": "contains_any", "accept": ["直播", "AI"]},
+        "event_start_at": {"mode": "datetime", "accept": ["2026-12-05T19:00:00+08:00"]},
+        "event_end_at": {"mode": "time_discipline", "accept_fragments": [], "note": "时长推算禁止：期望 null，出现 20:30 等推算时刻记违规"},
+        "is_online": {"mode": "exact", "accept": [true]},
+        "fee": {"mode": "nullable_or_contains", "accept": ["免费"]}
+      }
+    },
+    {
+      "id": "s6-fee-team-prize",
+      "kind": "synthetic",
+      "text": "青年创业大赛：报名免费，需 3-5 人组队参赛，冠军奖金 10 万元，决赛将于 2026-08-20 在杭州线下举行。",
+      "expected": {
+        "title": {"mode": "contains", "accept": ["创业"]},
+        "fee": {"mode": "contains_any", "accept": ["免费", "0"]},
+        "team_required": {"mode": "contains_any", "accept": ["3-5", "组队", "3～5", "3到5"]},
+        "prize": {"mode": "contains_any", "accept": ["10万", "十万", "100000"]},
+        "event_start_at": {"mode": "date", "accept": ["2026-08-20"]},
+        "location": {"mode": "contains", "accept": ["杭州"]},
+        "is_online": {"mode": "exact", "accept": [false]}
+      }
+    }
+  ]
+}
