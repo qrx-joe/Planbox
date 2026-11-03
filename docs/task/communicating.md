@@ -89,3 +89,10 @@ AI 的建议与不确定项：
 - 过程记录：本轮浏览器回归曾连续失败，排查确认为两个测试环境问题而非产品缺陷——合成服务库被重复运行污染（每次运行需重启服务取新库）、撤回按钮定位器在多组可撤正时 strict 冲突（取最新一组修复）、新断言段插入位置扰动后续截图依赖（移到流程末尾）。另按新默认状态更新 `test_t002_time.py` 一项 seed 断言。
 - 验证：浏览器回归 ×2 **全部 PASS**；八个后端定向文件 **319 passed**；Ruff 通过。T-006 标 `done`。
 - 下一步：T-003 图片位置契约，或（待用户确认 Q-007）直接进入真实模型接入 + Golden Set。
+
+## 2026-11-03：T-007 最小 CI——lint 清零与 GitHub Actions 落地（C-014）
+
+- 用户要求：先推送积压提交（已完成 13 个，远端无冲突），随后选择"做 T-007 的最小 CI：把现有定向测试入口固化成 GitHub Actions，跑 lint + 指定测试文件"。
+- 交付：全仓 Ruff 26 处存量逐处清零（长行拆分与未用导入，涉及 llm.py/wechat_fetcher.py/user_preference_service.py/scoring_service.py/test_e2e.py/verify_public.py）；新增 [ci.yml](../../.github/workflows/ci.yml)——后端 job（uv 锁定安装 → Ruff 全仓 → 8 个定向测试文件显式清单）、前端 job（npm ci → 构建 → 4 个 node 单测文件）。`test_e2e.py`（顶层发 HTTP 清库）与浏览器回归明确排除并注释说明；Node 固定 24 与本地一致。
+- 验证：本地同命令全套通过（Ruff 全绿 / 319 passed / node 38 passed / build）；推送 `22b6a54`、`01568ce` 后 GitHub Actions **首跑即绿**（run 41648400917，后端 17s 于 ubuntu 复现 319 passed，前端 17s）。唯一注解为 GitHub 官方 actions 的 Node 20 弃用提示，非失败。
+- T-007 标 `done`（e2e 入口重整与浏览器回归自动化明确排除）。下一步待用户选择：T-003 图片位置契约，或真实模型 + Golden Set（需先确认 Q-007）。
