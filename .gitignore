@@ -17,6 +17,8 @@ frontend/*.tsbuildinfo
 .env
 .env.*
 !.env.example
+# 评估报告按需以文档证据引用，json 原件不入库
+evals/report-*.json
 .testdata/
 .workbuddy/
 .wbapp_*.genie
