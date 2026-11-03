@@ -68,8 +68,12 @@ const { chromium } = require(process.env.PLANBOX_PLAYWRIGHT_PATH || 'playwright'
     await card.getByLabel('选择字段', { exact: true }).selectOption('organizer');
     await card.getByText('当前值：合成更正机构', { exact: true }).waitFor();
     await card.getByRole('button', { name: '收起编辑，返回确认', exact: true }).click();
-    await confirm.click();
-    await page.getByText('活动已入库，并标记为感兴趣', { exact: true }).waitFor();
+    // 键盘路径验收：focus + Enter 必须与点击等价触发确认
+    await confirm.focus();
+    await page.keyboard.press('Enter');
+    await page.getByText('已确认入库；是否参加请在机会库标记（感兴趣/已报名/放弃）', { exact: true }).waitFor();
+    // 确认事实不预设参与决定：入库活动初始状态为待核对
+    await page.getByText('待核对', { exact: true }).first().waitFor();
     await card.waitFor({ state: 'detached' });
     await page.getByRole('button', { name: 'Activities', exact: true }).click();
     const event = page.locator('article.source-row').filter({ hasText: '合成待核对草稿' });
@@ -82,7 +86,7 @@ const { chromium } = require(process.env.PLANBOX_PLAYWRIGHT_PATH || 'playwright'
     await nested.getByText('原因：已核对完整年份', { exact: true }).waitFor();
     assert.deepEqual(pageErrors, []);
     assert.equal(externalRequests, 0);
-    console.log('PASS: 草稿问题阻止确认、保存/重开、无效时间保留、撤回、窄屏、陈旧确认拒绝、已存版本入库、入库前历史只读；外部请求0。');
+    console.log('PASS: 草稿问题阻止确认、保存/重开、无效时间保留、撤回、窄屏、键盘确认、陈旧确认拒绝、已存版本入库（不预设参与状态）、入库前历史只读；外部请求0。');
   } finally {
     await context.close(); await browser.close();
   }

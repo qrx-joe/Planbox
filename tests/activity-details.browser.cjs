@@ -61,7 +61,8 @@ const { chromium } = require(process.env.PLANBOX_PLAYWRIGHT_PATH || 'playwright'
     await a.getByLabel('选择字段', { exact: true }).selectOption('organizer');
     await a.getByText('当前值：更正机构甲', { exact: true }).waitFor();
     await a.getByLabel('撤回原因（撤回时必填）').fill('合成撤回验证');
-    await a.getByRole('button', { name: '撤回这次保存', exact: true }).click();
+    // 多个字段可能各有一组未被覆盖的更正（各自可撤回），撤回目标取最新一组
+    await a.getByRole('button', { name: '撤回这次保存', exact: true }).first().click();
     await a.getByText('当前值：主办方甲', { exact: true }).waitFor();
     await a.getByText('撤回记录', { exact: false }).first().waitFor();
     await mkdir('.testdata/t003-ui-artifacts', { recursive: true });
@@ -112,9 +113,17 @@ const { chromium } = require(process.env.PLANBOX_PLAYWRIGHT_PATH || 'playwright'
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     await a.locator('.correction-form').screenshot({ path: '.testdata/t003-ui-artifacts/edit-mobile.png' });
+
+    // T-006：机会库筛选不缩小简报数据范围——Brief 独立拉取全量活动（放在全部流程后，不扰动前面依赖的页面状态）
+    await page.getByRole('button', { name: 'Activities', exact: true }).click();
+    await page.getByLabel('搜索活动').fill('活动B');
+    await page.locator('article.source-row').filter({ hasText: '合成活动A' }).first().waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: 'Brief', exact: true }).click();
+    await page.getByText(/合成活动A/).first().waitFor();
+
     assert.deepEqual(pageErrors, []);
     assert.equal(externalRequests, 0);
-    console.log('PASS: A/B乱序隔离、原文定位、保存/重开/撤回、结构化赛程增删、非法日期/陈旧版本拒绝、断网输入保留、证据/历史失败、390px无溢出；外部请求0。');
+    console.log('PASS: A/B乱序隔离、原文定位、保存/重开/撤回、结构化赛程增删、非法日期/陈旧版本拒绝、断网输入保留、证据/历史失败、机会库筛选不影响简报范围、390px无溢出；外部请求0。');
   } finally {
     releaseA();
     await context.close();

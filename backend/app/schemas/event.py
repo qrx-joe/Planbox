@@ -49,8 +49,15 @@ class EventStatusError(ValueError):
 
 
 class EventConfirm(BaseModel):
+    """确认草稿事实时的入参；确认事实与参与决定是两个动作。
+
+    默认只确认事实（needs_review，入库后待用户标记是否参加）；
+    允许顺带设置初始参与状态，但只接受确认时合法的初始值——
+    进行中/已结束等过程态与放弃（走 reject 端点）不能作为初始状态写入。
+    """
+
     extracted: ExtractedEventDraft | None = None
-    status: str = "interested"
+    status: Literal["needs_review", "interested", "applied"] = "needs_review"
     expected_revision: int | None = Field(default=None, ge=0)
 
 

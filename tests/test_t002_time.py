@@ -233,7 +233,8 @@ def test_patch_checks_range_against_stored_half_and_does_not_change_status(clien
     )
     assert result.status_code in (400, 422)
     current = client.get(f"/api/events/{event['id']}").json()
-    assert current["event_end_at"] == "2026-10-21" and current["status"] == "interested"
+    # 确认事实不再预设参与状态（T-006），seed 活动初始为待核对
+    assert current["event_end_at"] == "2026-10-21" and current["status"] == "needs_review"
 
 
 def test_bad_legacy_event_is_readable_but_export_has_review_list(client):

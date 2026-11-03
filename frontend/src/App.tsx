@@ -195,6 +195,10 @@ export function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  // Brief 用独立全量数据：不继承机会库页的筛选结果，避免筛选期间漏看关键节点
+  const [briefEvents, setBriefEvents] = useState<EventItem[] | null>(null);
+  const [briefError, setBriefError] = useState(false);
+  const [briefReload, setBriefReload] = useState(0);
 
   useEffect(() => {
     void refreshAll();
@@ -203,6 +207,25 @@ export function App() {
   useEffect(() => {
     void loadEvents();
   }, [filters]);
+
+  useEffect(() => {
+    if (activeView !== "brief") return;
+    let cancelled = false;
+    setBriefError(false);
+    void (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/events?paginated=false`);
+        if (!response.ok) throw new Error("brief load failed");
+        const data: EventItem[] = await response.json();
+        if (!cancelled) setBriefEvents(data);
+      } catch {
+        if (!cancelled) setBriefError(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeView, briefReload]);
 
   // 分享唤起：读URL 参数做预填，不自动提交，等用户确认
   useEffect(() => {
@@ -405,9 +428,10 @@ export function App() {
       await requestDetail<EventItem>(`${API_BASE_URL}/api/review-queue/${extractionId}/confirm`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "interested", expected_revision: revision }),
+        // 确认事实 ≠ 决定参加：入库时只标记待核对，参与状态由用户在机会库单独选择
+        body: JSON.stringify({ status: "needs_review", expected_revision: revision }),
       });
-      setMessage("活动已入库，并标记为感兴趣");
+      setMessage("已确认入库；是否参加请在机会库标记（感兴趣/已报名/放弃）");
       await refreshAll();
     } catch (error) {
       setMessage(error instanceof TypeError ? "确认结果未知，请先检查活动库再重试"
@@ -1054,7 +1078,24 @@ export function App() {
           </>
         ) : null}
 
-        {activeView === "brief" ? <BriefView events={events} reviewItems={reviewItems} /> : null}
+        {activeView === "brief" ? (
+          briefError ? (
+            <section className="empty">
+              <p>简报数据读取失败，请检查后端服务后重试。</p>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setBriefReload((value) => value + 1)}
+              >
+                重试
+              </button>
+            </section>
+          ) : briefEvents === null ? (
+            <p className="empty">简报加载中…</p>
+          ) : (
+            <BriefView events={briefEvents} reviewItems={reviewItems} />
+          )
+        ) : null}
       </section>
     </main>
   );
