@@ -103,6 +103,8 @@ SYSTEM_PROMPT = """你是一个活动信息结构化抽取专家。用户会提�
 6. missing_fields 列出所有原文未提供但对参加活动很重要的字段
 7. confidence 表示你对抽取结果的整体信心，0-1之间
 8. location 提取城市名即可（如"上海"、"北京"），不要详细地址
+9. 如果整段文本不包含任何活动、比赛或报名信息，title 设为空字符串 ""，
+   其余字段全部为 null，missing_fields 设为 ["title"]；不要为了完成任务编造活动
 
 注意：
 - 如果原文没有明确的报名链接，但提供了 source_url，可以用 source_url 作为 registration_url 候选

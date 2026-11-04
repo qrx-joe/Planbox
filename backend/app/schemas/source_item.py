@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 SourceType = Literal["wechat", "xhs", "web", "screenshot", "manual", "text"]
-ParseStatus = Literal["unparsed", "pending", "parsed", "failed"]
+ParseStatus = Literal["unparsed", "pending", "parsed", "failed", "no_event"]
 
 
 class SourceItemCreate(BaseModel):

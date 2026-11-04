@@ -24,6 +24,7 @@ from backend.app.repositories.source_item_repository import (
 from backend.app.schemas.extraction import (
     EvidenceDraft,
     ExtractedEventDraft,
+    ExtractionNoEvent,
     ExtractionResultRead,
     ReviewQueueItem,
 )
@@ -109,10 +110,13 @@ class ExtractionService:
                 "来源正在抽取，请稍后重试；长时间无结果可稍后再试或核对状态"
             )
 
-    async def extract(self, source_item_id: str) -> ExtractionResultRead:
+    async def extract(
+        self, source_item_id: str,
+    ) -> ExtractionResultRead | ExtractionNoEvent:
         """抽取来源文本；成功原子保存候选/证据并标 parsed，失败标 failed 后抛出。
 
         unparsed/failed 可尝试，parsed 复用既有结果（保留核对状态与更正）；
+        原文不含活动时来源标 no_event 并返回提示（不建草稿，重复请求同样幂等返回）；
         pending 在宽限期内抛 SourceStateConflict，超过 STALE_PENDING_AFTER 视为
         上次进程崩溃遗留、允许重新认领；其余异常状态同样抛 SourceStateConflict。
         缺来源抛 KeyError，缺正文抛 ValueError。模型失败抛 ExtractionFailed；
@@ -125,6 +129,8 @@ class ExtractionService:
                 if previous is None:
                     raise SourceStateConflict("来源已标记解析成功但缺少结果，请先核对数据")
                 return self._to_read(previous)
+            if state == "no_event":
+                return ExtractionNoEvent()
             if state == "pending":
                 self._reject_in_flight_or_stale(source)
             elif state not in {"unparsed", "failed"}:
@@ -160,6 +166,16 @@ class ExtractionService:
                 break
 
             timestamp = now_iso()
+            if not str(draft.title).strip():
+                # 模型判定原文不含活动（title 为空）：如实标记，不强行生成卡片
+                with self.source_repository.edit(source_item_id) as (connection, current):
+                    if current["parse_status"] != "pending":
+                        raise SourceStateConflict("抽取状态已改变，请重新读取来源状态")
+                    self.source_repository.update_parse_status(
+                        source_item_id, "no_event", timestamp,
+                        "未发现活动：这条内容里没有可提取的活动信息", connection,
+                    )
+                return ExtractionNoEvent()
             result_id = new_id("ext")
             with self.source_repository.edit(source_item_id) as (connection, current):
                 if current["parse_status"] != "pending":

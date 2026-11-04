@@ -1332,6 +1332,11 @@ textarea {
   color: #c86b5c;
 }
 
+.status.no_event {
+  background: #eeeae3;
+  color: #7d746b;
+}
+
 .status.applied {
   background: var(--primary-soft);
   color: #b95e36;

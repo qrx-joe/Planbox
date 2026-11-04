@@ -109,6 +109,8 @@ class ContentCompleteResponse(BaseModel):
     title: str | None = None
     extraction_started: bool = False
     extraction_id: str | None = None
+    # 解析终态：parsed=已生成草稿；no_event=未发现活动；failed=抽取失败可重试
+    parse_status: str | None = None
 
 
 def _extract_article_url(text: str) -> str | None:

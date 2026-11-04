@@ -36,6 +36,7 @@ class ControlledProvider(BaseLLMProvider):
     def __init__(self):
         self.calls = 0
         self.error = None
+        self.empty_title = False
         self.started = Event()
         self.release = None
         self.observed_states = []
@@ -52,7 +53,9 @@ class ControlledProvider(BaseLLMProvider):
             assert await asyncio.to_thread(self.release.wait, 5), "测试未释放模型暂停点"
         if self.error is not None:
             raise self.error
-        return ExtractedEventDraft(title="合成活动", organizer="合成主办方")
+        return ExtractedEventDraft(
+            title="" if self.empty_title else "合成活动",
+            organizer=None if self.empty_title else "合成主办方")
 
 
 @pytest.fixture
@@ -524,3 +527,50 @@ def test_stale_pending_reclaimed_after_timeout(api):
     assert reclaimed.status_code == 200, reclaimed.text
     assert current(api, source_id)["parse_status"] == "parsed"
     assert _first_draft(api)["extracted"]["title"] == "合成活动"
+
+
+NO_EVENT_BODY = ("今天天气不错，我去公园散步，顺便买了一杯咖啡，坐在长椅上看了一会儿书。"
+                  "下午回家整理了房间，给花浇了水，晚上读了几十页小说，平淡又放松的一天。")
+
+
+def test_no_event_text_returns_no_event_without_draft(api):
+    """无活动文本：来源标 no_event、不建草稿与证据，返回可读提示。"""
+    source_id = source(api, raw_text=NO_EVENT_BODY)
+    api.provider.empty_title = True
+    result = api.post(f"/api/source-items/{source_id}/extract")
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["status"] == "no_event"
+    assert "未发现活动" in body["message"]
+    assert current(api, source_id)["parse_status"] == "no_event"
+    assert counts()[:2] == (0, 0)
+
+
+def test_no_event_retry_is_idempotent_without_model_call(api):
+    """no_event 的重复抽取幂等返回提示，不再调用模型或建草稿。"""
+    api.provider.empty_title = True
+    source_id = source(api)
+    assert api.post(f"/api/source-items/{source_id}/extract").status_code == 200
+    calls_after_first = api.provider.calls
+    again = api.post(f"/api/source-items/{source_id}/extract")
+    assert again.status_code == 200, again.text
+    assert again.json()["status"] == "no_event"
+    assert api.provider.calls == calls_after_first
+    with connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM extraction_results").fetchone()[0] == 0
+
+
+def test_completion_no_event_reports_clear_state(api):
+    """分享补全后未发现活动：ready + parse_status=no_event + 无草稿 id。"""
+    api.provider.empty_title = True
+    source_id = api.post("/api/share/intake", json={}).json()["source_item_id"]
+    result = api.post(
+        f"/api/share/{source_id}/complete",
+        json={"raw_text": NO_EVENT_BODY, "auto_extract": True},
+    )
+    assert result.status_code == 200, result.text
+    data = result.json()
+    assert data["state"] == "ready"
+    assert data["parse_status"] == "no_event"
+    assert data["extraction_id"] is None
+    assert data["extraction_started"] is True

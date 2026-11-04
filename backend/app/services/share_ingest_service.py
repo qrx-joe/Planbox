@@ -140,9 +140,12 @@ class ShareIngestService:
             extraction_started = await self._extract(source_item_id)
 
         current = self.source_service.get(source_item_id)
+        parse_status = None
         if current is not None and current.parse_status == "parsed":
             previous = ExtractionRepository().latest_for_source(source_item_id)
             extraction_id = str(previous["id"]) if previous else None
+        if current is not None:
+            parse_status = current.parse_status
 
         return ContentCompleteResponse(
             source_item_id=updated.id,
@@ -150,6 +153,7 @@ class ShareIngestService:
             title=updated.title,
             extraction_started=extraction_started,
             extraction_id=extraction_id,
+            parse_status=parse_status,
         )
 
     # ---------- 内部 ----------

@@ -19,7 +19,8 @@ class EvidenceDraft(BaseModel):
 
 
 class ExtractedEventDraft(BaseModel):
-    title: str
+    # 空串表示"未发现活动"：模型对无活动文本不编造标题，由服务层据此分流
+    title: str = ""
     event_type: str | None = None
     organizer: str | None = None
     registration_url: str | None = None
@@ -88,3 +89,10 @@ class ReviewQueueItem(BaseModel):
     source_url: str | None = None
     source_text: str | None = None
     source_type: str
+
+
+class ExtractionNoEvent(BaseModel):
+    """抽取完成但原文不含活动：不建草稿，来源标记 no_event，可被前端直接提示。"""
+
+    status: Literal["no_event"] = "no_event"
+    message: str = "未发现活动：这条内容里没有可提取的活动信息"

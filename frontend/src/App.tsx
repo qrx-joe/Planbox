@@ -127,6 +127,7 @@ const PARSE_STATUS_LABELS: Record<string, string> = {
   unparsed: "未抽取",
   parsed: "已解析",
   failed: "抽取失败",
+  no_event: "未发现活动",
 };
 
 /** 收集条目的来源标识：图标底色与缩写 */
@@ -299,7 +300,12 @@ export function App() {
         const err = await response.json().catch(() => ({}));
         throw new Error(err.detail || "补全失败");
       }
-      setMessage("正文已补全，已生成待确认草稿");
+      const data = await response.json();
+      if (data?.parse_status === "no_event") {
+        setMessage("正文已补全；未发现活动：这条内容里没有可提取的活动信息");
+      } else {
+        setMessage("正文已补全，已生成待确认草稿");
+      }
       setPendingContent(null);
       setRawText("");
       setSharePayload(null);
@@ -412,6 +418,13 @@ export function App() {
       });
       if (!response.ok) {
         throw new Error("抽取失败");
+      }
+      const data = await response.json();
+      if (data?.status === "no_event") {
+        // 原文不含活动：如实告知，不建草稿也不切换视图
+        setMessage(data.message || "未发现活动：这条内容里没有可提取的活动信息");
+        await refreshAll();
+        return;
       }
       setMessage("已生成待确认活动草稿");
       setActiveView("review");

@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, status
 
 from backend.app.core.time import now_iso
 from backend.app.repositories.source_item_repository import SourceStateConflict
-from backend.app.schemas.extraction import ExtractionResultRead
+from backend.app.schemas.extraction import ExtractionNoEvent, ExtractionResultRead
 from backend.app.schemas.source_item import (
     SourceFetchResponse,
     SourceItemCreate,
@@ -216,8 +216,9 @@ def get_source_item(source_item_id: str) -> SourceItemRead:
     return item
 
 
-@router.post("/{source_item_id}/extract", response_model=ExtractionResultRead)
-async def request_extraction(source_item_id: str) -> ExtractionResultRead:
+@router.post("/{source_item_id}/extract",
+             response_model=ExtractionResultRead | ExtractionNoEvent)
+async def request_extraction(source_item_id: str) -> ExtractionResultRead | ExtractionNoEvent:
     """抽取或复用已保存结果；状态门禁、认领和持久化由服务统一执行。"""
     try:
         return await extraction_service.extract(source_item_id)
