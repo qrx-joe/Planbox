@@ -96,3 +96,12 @@ AI 的建议与不确定项：
 - 交付：全仓 Ruff 26 处存量逐处清零（长行拆分与未用导入，涉及 llm.py/wechat_fetcher.py/user_preference_service.py/scoring_service.py/test_e2e.py/verify_public.py）；新增 [ci.yml](../../.github/workflows/ci.yml)——后端 job（uv 锁定安装 → Ruff 全仓 → 8 个定向测试文件显式清单）、前端 job（npm ci → 构建 → 4 个 node 单测文件）。`test_e2e.py`（顶层发 HTTP 清库）与浏览器回归明确排除并注释说明；Node 固定 24 与本地一致。
 - 验证：本地同命令全套通过（Ruff 全绿 / 319 passed / node 38 passed / build）；推送 `22b6a54`、`01568ce` 后 GitHub Actions **首跑即绿**（run 41648400917，后端 17s 于 ubuntu 复现 319 passed，前端 17s）。唯一注解为 GitHub 官方 actions 的 Node 20 弃用提示，非失败。
 - T-007 标 `done`（e2e 入口重整与浏览器回归自动化明确排除）。下一步待用户选择：T-003 图片位置契约，或真实模型 + Golden Set（需先确认 Q-007）。
+
+## 2026-11-05：真实模型首轮评估——StepFun 接入跑通与质量结论（C-015）
+
+- 用户要求："用 step fun"；随后提供账户截图（已订阅 Plus Plan，有效期至 2026-11-22）并协助定位额度问题。
+- 接入过程：标准端点报 402（订阅额度不走 `/v1`）、`step-1-8k` 在 Step Plan 端点 404（旧型号不在列表）——依截图与官方文档改用 **`https://api.stepfun.com/step_plan/v1` + `step-5-preview`** 后跑通。配置模板已更新。
+- 执行：黄金集 9 条（3 真实 + 6 合成）全量 + 冒烟/重试，有效调用约 13 次、约 24.5K tokens，套餐内扣减。
+- 结果（人工复核后）：字段准确率 **97.2%**（35/36）、编造 0、时间纪律违规 0（三个时间陷阱全守住）；唯一 miss 为导航噪音页漏提地点。三个产品缺口：无活动文本被 schema 拒绝（应支持"未发现活动"）、多活动丢一条（N-002 实证）、p50 延迟 24s 偏慢（待试 step-3.5-flash 对比）。
+- 元教训：4 处初判"模型错"中 3 处为标注严于契约（source_url 候选/中文片段/免费补贴），修正标注——金标准同样需要 Review。
+- 下一步：修"未发现活动"缺口 → 真实模型下人工过一遍收集→Review 全流程 → 视觉模型验证（T-003 前置）。
