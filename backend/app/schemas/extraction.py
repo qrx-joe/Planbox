@@ -64,6 +64,8 @@ class ExtractionResultRead(BaseModel):
     created_at: str
     updated_at: str
     revision: int = 0
+    # 本次抽取除主候选外额外生成的草稿数（多活动文本 >0）；旧客户端可忽略
+    additional_extractions: int = 0
 
 
 class DraftEdit(BaseModel):

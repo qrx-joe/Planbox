@@ -37,11 +37,12 @@ class ControlledProvider(BaseLLMProvider):
         self.calls = 0
         self.error = None
         self.empty_title = False
+        self.multi_event = False
         self.started = Event()
         self.release = None
         self.observed_states = []
 
-    async def extract_event(self, text, url=None):
+    async def extract_events(self, text, url=None):
         self.calls += 1
         with connect() as connection:
             row = connection.execute(
@@ -53,9 +54,16 @@ class ControlledProvider(BaseLLMProvider):
             assert await asyncio.to_thread(self.release.wait, 5), "测试未释放模型暂停点"
         if self.error is not None:
             raise self.error
-        return ExtractedEventDraft(
+        if self.multi_event:
+            return [ExtractedEventDraft(title="智能体创新赛"),
+                    ExtractedEventDraft(title="产品沙龙")]
+        return [ExtractedEventDraft(
             title="" if self.empty_title else "合成活动",
-            organizer=None if self.empty_title else "合成主办方")
+            organizer=None if self.empty_title else "合成主办方")]
+
+    async def extract_event(self, text, url=None):
+        events = await self.extract_events(text, url)
+        return events[0]
 
 
 @pytest.fixture
@@ -574,3 +582,31 @@ def test_completion_no_event_reports_clear_state(api):
     assert data["parse_status"] == "no_event"
     assert data["extraction_id"] is None
     assert data["extraction_started"] is True
+
+
+def test_multi_event_text_creates_all_drafts_in_one_transaction(api):
+    """多活动文本：每个候选各建草稿（同事务），响应标记额外数量。"""
+    api.provider.multi_event = True
+    source_id = source(api)
+    result = api.post(f"/api/source-items/{source_id}/extract")
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["additional_extractions"] == 1
+    titles = {item["extraction"]["extracted"]["title"]
+              for item in api.get("/api/review-queue").json()}
+    assert titles == {"智能体创新赛", "产品沙龙"}
+    assert current(api, source_id)["parse_status"] == "parsed"
+    assert counts()[0] == 2
+
+
+def test_multi_event_retry_reuses_all_without_model_call(api):
+    """多草稿的重复抽取：复用最新主草稿并报告额外数，不再调用模型。"""
+    api.provider.multi_event = True
+    source_id = source(api)
+    assert api.post(f"/api/source-items/{source_id}/extract").status_code == 200
+    calls_after_first = api.provider.calls
+    again = api.post(f"/api/source-items/{source_id}/extract")
+    assert again.status_code == 200, again.text
+    assert again.json()["additional_extractions"] == 1
+    assert api.provider.calls == calls_after_first
+    assert counts()[0] == 2  # 不重复建档

@@ -34,6 +34,16 @@ class ExtractionRepository:
             ).fetchone()
             return self.get(str(row["id"]), active) if row else None
 
+    def count_for_source(
+        self, source_item_id: str, connection: sqlite3.Connection | None = None,
+    ) -> int:
+        """该来源的草稿总数，用于多活动抽取的复用计数。"""
+        with (nullcontext(connection) if connection is not None else connect()) as active:
+            return int(active.execute(
+                "SELECT COUNT(*) FROM extraction_results WHERE source_item_id = ?",
+                (source_item_id,),
+            ).fetchone()[0])
+
     def list_pending(self) -> list[dict[str, object]]:
         with connect() as connection:
             rows = connection.execute(

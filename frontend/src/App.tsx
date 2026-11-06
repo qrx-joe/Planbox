@@ -426,7 +426,12 @@ export function App() {
         await refreshAll();
         return;
       }
-      setMessage("已生成待确认活动草稿");
+      const extra = Number(data?.additional_extractions ?? 0);
+      setMessage(
+        extra > 0
+          ? `发现 ${extra + 1} 个活动候选，已全部生成待核对草稿`
+          : "已生成待确认活动草稿"
+      );
       setActiveView("review");
       await refreshAll();
     } finally {

@@ -128,7 +128,11 @@ class ExtractionService:
                 previous = self.extraction_repository.latest_for_source(source_item_id, connection)
                 if previous is None:
                     raise SourceStateConflict("来源已标记解析成功但缺少结果，请先核对数据")
-                return self._to_read(previous)
+                reused = self._to_read(previous)
+                reused.additional_extractions = max(
+                    0, self.extraction_repository.count_for_source(
+                        source_item_id, connection) - 1)
+                return reused
             if state == "no_event":
                 return ExtractionNoEvent()
             if state == "pending":
@@ -147,27 +151,29 @@ class ExtractionService:
                 provider = self._get_llm_provider()
                 url = str(source.get("source_url") or "") or None
                 if isinstance(provider, FakeLLMProvider):
-                    draft = self._rule_based_extract(source)
+                    drafts = [self._rule_based_extract(source)]
                 else:
-                    draft = await self._llm_extract(provider, text, url)
+                    drafts = await self._llm_extract_all(provider, text, url)
             except Exception as exc:
                 raise ExtractionFailed(EXTRACTION_ERROR) from exc
 
             # 参照来自实际来源记录；仍不自动推断跨年或相对日期。
-            for reference_kind in ("published_at", "captured_at"):
-                reference = source.get(reference_kind)
-                try:
-                    parse_time(reference)
-                except TimeValueError:
-                    continue
-                draft.time_issues = [replace(
-                    issue, reference_at=reference, reference_kind=reference_kind
-                ) for issue in draft.time_issues]
-                break
+            for draft in drafts:
+                for reference_kind in ("published_at", "captured_at"):
+                    reference = source.get(reference_kind)
+                    try:
+                        parse_time(reference)
+                    except TimeValueError:
+                        continue
+                    draft.time_issues = [replace(
+                        issue, reference_at=reference, reference_kind=reference_kind
+                    ) for issue in draft.time_issues]
+                    break
 
+            # 一篇文本可能有多个活动候选；空标题的候选视为模型未给出该活动，不建卡
+            candidates = [draft for draft in drafts if str(draft.title).strip()]
             timestamp = now_iso()
-            if not str(draft.title).strip():
-                # 模型判定原文不含活动（title 为空）：如实标记，不强行生成卡片
+            if not candidates:
                 with self.source_repository.edit(source_item_id) as (connection, current):
                     if current["parse_status"] != "pending":
                         raise SourceStateConflict("抽取状态已改变，请重新读取来源状态")
@@ -176,39 +182,42 @@ class ExtractionService:
                         "未发现活动：这条内容里没有可提取的活动信息", connection,
                     )
                 return ExtractionNoEvent()
-            result_id = new_id("ext")
+            rows: list[dict] = []
             with self.source_repository.edit(source_item_id) as (connection, current):
                 if current["parse_status"] != "pending":
                     raise SourceStateConflict("抽取状态已改变，请重新读取来源状态")
-                row = self.extraction_repository.create({
-                    "id": result_id,
-                    "source_item_id": source_item_id,
-                    "status": "pending_review",
-                    "extracted_json": dumps_json(draft.model_dump()),
-                    "missing_fields": dumps_json(draft.missing_fields),
-                    "confidence": draft.confidence,
-                    "created_at": timestamp,
-                    "updated_at": timestamp,
-                }, connection)
-                self.extraction_repository.create_evidences([
-                    {
-                        "id": new_id("evd"),
-                        "event_id": None,
-                        "extraction_result_id": result_id,
+                for draft in candidates:
+                    result_id = new_id("ext")
+                    rows.append(self.extraction_repository.create({
+                        "id": result_id,
                         "source_item_id": source_item_id,
-                        "field_name": evidence.field,
-                        "field_value": evidence.value,
-                        "evidence_text": evidence.evidence,
-                        "confidence": evidence.confidence,
+                        "status": "pending_review",
+                        "extracted_json": dumps_json(draft.model_dump()),
+                        "missing_fields": dumps_json(draft.missing_fields),
+                        "confidence": draft.confidence,
                         "created_at": timestamp,
-                    }
-                    for evidence in draft.evidences
-                ], connection)
+                        "updated_at": timestamp,
+                    }, connection))
+                    self.extraction_repository.create_evidences([
+                        {
+                            "id": new_id("evd"),
+                            "event_id": None,
+                            "extraction_result_id": result_id,
+                            "source_item_id": source_item_id,
+                            "field_name": evidence.field,
+                            "field_value": evidence.value,
+                            "evidence_text": evidence.evidence,
+                            "confidence": evidence.confidence,
+                            "created_at": timestamp,
+                        }
+                        for evidence in draft.evidences
+                    ], connection)
                 self.source_repository.update_parse_status(
                     source_item_id, "parsed", timestamp, connection=connection,
                 )
-                result = self._to_read(row)
-            return result
+            primary = self._to_read(rows[0])
+            primary.additional_extractions = len(rows) - 1
+            return primary
         except (Exception, CancelledError):
             with self.source_repository.edit(source_item_id) as (connection, current):
                 if current["parse_status"] == "pending":
@@ -217,38 +226,40 @@ class ExtractionService:
                     )
             raise
 
-    async def _llm_extract(
+    async def _llm_extract_all(
         self,
         provider: BaseLLMProvider,
         text: str,
         url: str | None,
-    ) -> ExtractedEventDraft:
-        raw_result = await provider.extract_event(text, url)
+    ) -> list[ExtractedEventDraft]:
+        """一次调用返回的全部活动候选，逐个补证据定位与缺失清单。"""
+        raw_results = await provider.extract_events(text, url)
 
-        evidences = self._generate_evidences(raw_result, text)
-
-        missing_fields = self._compute_missing_fields(raw_result)
-
-        return ExtractedEventDraft(
-            title=raw_result.title,
-            event_type=raw_result.event_type,
-            organizer=raw_result.organizer,
-            registration_url=raw_result.registration_url,
-            registration_start_at=raw_result.registration_start_at,
-            registration_deadline_at=raw_result.registration_deadline_at,
-            event_start_at=raw_result.event_start_at,
-            event_end_at=raw_result.event_end_at,
-            location=raw_result.location,
-            is_online=raw_result.is_online,
-            schedule=raw_result.schedule,
-            fee=raw_result.fee,
-            prize=raw_result.prize,
-            team_required=raw_result.team_required,
-            audience=raw_result.audience,
-            missing_fields=missing_fields,
-            confidence=raw_result.confidence,
-            evidences=evidences,
-        )
+        drafts: list[ExtractedEventDraft] = []
+        for raw_result in raw_results:
+            evidences = self._generate_evidences(raw_result, text)
+            missing_fields = self._compute_missing_fields(raw_result)
+            drafts.append(ExtractedEventDraft(
+                title=raw_result.title,
+                event_type=raw_result.event_type,
+                organizer=raw_result.organizer,
+                registration_url=raw_result.registration_url,
+                registration_start_at=raw_result.registration_start_at,
+                registration_deadline_at=raw_result.registration_deadline_at,
+                event_start_at=raw_result.event_start_at,
+                event_end_at=raw_result.event_end_at,
+                location=raw_result.location,
+                is_online=raw_result.is_online,
+                schedule=raw_result.schedule,
+                fee=raw_result.fee,
+                prize=raw_result.prize,
+                team_required=raw_result.team_required,
+                audience=raw_result.audience,
+                missing_fields=missing_fields,
+                confidence=raw_result.confidence,
+                evidences=evidences,
+            ))
+        return drafts
 
     def _generate_evidences(
         self,

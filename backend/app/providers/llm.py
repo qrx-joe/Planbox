@@ -14,6 +14,12 @@ class BaseLLMProvider(ABC):
     async def extract_event(self, text: str, url: str | None = None) -> ExtractedEventDraft:
         raise NotImplementedError
 
+    async def extract_events(
+        self, text: str, url: str | None = None,
+    ) -> list[ExtractedEventDraft]:
+        """一次抽取的全部活动候选。默认实现兼容单活动 Provider；多活动由子类覆写。"""
+        return [await self.extract_event(text, url)]
+
 
 EXTRACTION_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -89,10 +95,12 @@ EXTRACTION_SCHEMA: dict[str, Any] = {
 
 SYSTEM_PROMPT = """你是一个活动信息结构化抽取专家。用户会提供一段活动文本
 （可能来自微信推文、小红书笔记、活动行、掘金等平台），你需要从中抽取结构化的活动信息。
+一篇文本可能同时包含多个活动：把每个活动都作为独立候选完整抽出，不要遗漏，也不要合并。
 
-你必须严格只输出一个 JSON 对象，不要有任何其他文字、markdown 代码块标记或解释。
+你必须严格只输出一个 JSON 对象，格式为 {"events": [活动对象, ...]}，
+不要有任何其他文字、markdown 代码块标记或解释。
 
-抽取规则：
+抽取规则（作用于 events 里的每个活动对象）：
 1. 只输出纯 JSON，不要 ```json 标记
 2. 字段缺失时，值设为 null（不要用空字符串）
 3. 不要编造信息，只基于原文抽取
@@ -103,8 +111,8 @@ SYSTEM_PROMPT = """你是一个活动信息结构化抽取专家。用户会提�
 6. missing_fields 列出所有原文未提供但对参加活动很重要的字段
 7. confidence 表示你对抽取结果的整体信心，0-1之间
 8. location 提取城市名即可（如"上海"、"北京"），不要详细地址
-9. 如果整段文本不包含任何活动、比赛或报名信息，title 设为空字符串 ""，
-   其余字段全部为 null，missing_fields 设为 ["title"]；不要为了完成任务编造活动
+9. 如果整段文本不包含任何活动、比赛或报名信息，events 设为空数组 []；
+   不要为了完成任务编造活动
 
 注意：
 - 如果原文没有明确的报名链接，但提供了 source_url，可以用 source_url 作为 registration_url 候选
@@ -152,7 +160,9 @@ class OpenAIProvider(BaseLLMProvider):
         # 最近一次调用的用量，供评估脚本观测；不影响抽取行为
         self.last_usage: dict[str, int] | None = None
 
-    async def extract_event(self, text: str, url: str | None = None) -> ExtractedEventDraft:
+    async def extract_events(
+        self, text: str, url: str | None = None,
+    ) -> list[ExtractedEventDraft]:
         url_block = f"来源链接：{url}" if url else ""
         schema_text = _build_schema_text(EXTRACTION_SCHEMA)
         user_prompt = USER_PROMPT_TEMPLATE.format(
@@ -198,7 +208,17 @@ class OpenAIProvider(BaseLLMProvider):
             content = "\n".join(lines).strip()
 
         parsed = json.loads(content)
-        return ExtractedEventDraft.model_validate(parsed)
+        if isinstance(parsed, dict) and isinstance(parsed.get("events"), list):
+            # 多活动协议：模型输出 {"events": [活动, ...]}，逐个校验
+            return [ExtractedEventDraft.model_validate(item) for item in parsed["events"]]
+        # 兼容模型偶尔退回的单对象形态
+        return [ExtractedEventDraft.model_validate(parsed)]
+
+    async def extract_event(self, text: str, url: str | None = None) -> ExtractedEventDraft:
+        events = await self.extract_events(text, url)
+        if not events:
+            raise ValueError("模型未返回活动候选")
+        return events[0]
 
 
 class FakeLLMProvider(BaseLLMProvider):
